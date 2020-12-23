@@ -73,69 +73,68 @@ def main():
       if (i != j) & (dij < Rc): A[i,j] += ( math.erfc(alpha*dij) - math.erfc(etasqr2*dij) ) / dij 
       
       # k-space contributions (see metalwalls doc)
-      for u in range(-nx,nx+1):
-        for v in range(-ny,ny+1):
-          for w in range(-nz,nz+1):
-            if u+v+w == 0: continue
-            kx = kprefac[0]*u
-            ky = kprefac[1]*v
-            kz = kprefac[2]*w
-            
-            ksq = np.dot([kx,ky,kz],[kx,ky,kz])
-            kdotr = np.dot([kx,ky,kz],rij)
-            
-            pref = 4.*np.pi*Vinv*np.exp(-ksq/(4.*alpha**2))/ksq
-          
-            A[i,j] += pref*np.cos(kdotr)
-      
-#      kx = 0.
-#      for v in range(1,ny+1):
-#        for w in range(-nz,nz+1): 
-#          ky = kprefac[1]*v
-#          kz = kprefac[2]*w
-#          
-#          ksq = np.dot([kx,ky,kz],[kx,ky,kz])
-#          kdotrj = np.dot([kx,ky,kz],r[j])
-#          
-#          # TODO: could be pre-computed in i-loop
-#          Cx = np.cos(kx*r[i,0])
-#          Cy = np.cos(ky*r[i,1])
-#          Cz = np.cos(kz*r[i,2])
-#          Sx = np.sin(kx*r[i,0])
-#          Sy = np.sin(ky*r[i,1])
-#          Sz = np.sin(kz*r[i,2])
-#          
-#          C = Cx*Cy*Cz - Sx*Cy*Cz - Cx*Sy*Cz - Cx*Cy*Sz
-#          S = Sx*Cy*Cz + Cx*Sy*Cz + Cx*Cy*Sz - Sx*Sy*Sz
-#          
-#          pref = 8.0*np.pi*Vinv*np.exp(-ksq/(4.*alpha**2))/ksq
-#          
-#          A[i,j] += pref*(C*np.cos(kdotrj) + S*np.sin(kdotrj)) 
-#          
-#      for u in range(1,nx+1):
+#      for u in range(-nx,nx+1):
 #        for v in range(-ny,ny+1):
 #          for w in range(-nz,nz+1):
+#            # exclude k=0
+#            if u+v+w == 0: continue
+#            
 #            kx = kprefac[0]*u
 #            ky = kprefac[1]*v
 #            kz = kprefac[2]*w
 #            
 #            ksq = np.dot([kx,ky,kz],[kx,ky,kz])
-#            kdotrj = np.dot([kx,ky,kz],r[j])
+#            kdotr = np.dot([kx,ky,kz],rij)
 #            
-#            Cx = np.cos(kx*r[i,0])
-#            Cy = np.cos(ky*r[i,1])
-#            Cz = np.cos(kz*r[i,2])
-#            Sx = np.sin(kx*r[i,0])
-#            Sy = np.sin(ky*r[i,1])
-#            Sz = np.sin(kz*r[i,2])
-#            
-#            C = Cx*Cy*Cz - Sx*Cy*Cz - Cx*Sy*Cz - Cx*Cy*Sz
-#            S = Sx*Cy*Cz + Cx*Sy*Cz + Cx*Cy*Sz - Sx*Sy*Sz
-#            
-#            pref = 8.0*np.pi*Vinv*np.exp(-ksq/(4.*alpha**2))/ksq
-#            
-#            A[i,j] += pref*(C*np.cos(kdotrj) + S*np.sin(kdotrj))  
+#            pref = 4.*np.pi*Vinv*np.exp(-ksq/(4.*alpha**2))/ksq
+#          
+#            A[i,j] += pref*np.cos(kdotr)
       
+      Sk_cos = 0.
+      Sk_sin = 0.
+      for u in range(0,nx+1):
+        for v in range(-ny,ny+1) if u > 0 else range(1,ny+1):
+          for w in range(-nz,nz+1):
+            kx = kprefac[0]*u
+            ky = kprefac[1]*v
+            kz = kprefac[2]*w
+            
+            ksq = np.dot([kx,ky,kz],[kx,ky,kz])            
+            Sk_alpha = 8.0*np.pi*Vinv*np.exp(-ksq/(4.*alpha**2))/ksq
+            
+            cos_kx = np.cos(kx*r[j,0])
+            cos_ky = np.cos(ky*r[j,1])
+            cos_kz = np.cos(kz*r[j,2])
+            sin_kx = np.sin(kx*r[j,0])
+            sin_ky = np.sin(ky*r[j,1])
+            sin_kz = np.sin(kz*r[j,2])
+            
+            # Compute cos/sin values using trigonometric rules
+            cos_kxky = cos_kx * cos_ky - sin_kx * sin_ky
+            sin_kxky = sin_kx * cos_ky + cos_kx * sin_ky
+            cos_kxkykz = cos_kxky * cos_kz - sin_kxky * sin_kz
+            sin_kxkykz = sin_kxky * cos_kz + cos_kxky * sin_kz
+            
+            Sk_cos = Sk_cos + cos_kxkykz
+            Sk_sin = Sk_sin + sin_kxkykz
+            
+      for u in range(0,nx+1):
+        for v in range(-ny,ny+1) if u > 0 else range(1,ny+1):
+          for w in range(-nz,nz+1):
+            cos_kx = np.cos(kx*r[i,0])
+            cos_ky = np.cos(ky*r[i,1])
+            cos_kz = np.cos(kz*r[i,2])
+            sin_kx = np.sin(kx*r[i,0])
+            sin_ky = np.sin(ky*r[i,1])
+            sin_kz = np.sin(kz*r[i,2])
+            
+            # Compute cos/sin values using trigonometric rules
+            cos_kxky = cos_kx * cos_ky - sin_kx * sin_ky
+            sin_kxky = sin_kx * cos_ky + cos_kx * sin_ky
+            cos_kxkykz = cos_kxky * cos_kz - sin_kxky * sin_kz
+            sin_kxkykz = sin_kxky * cos_kz + cos_kxky * sin_kz
+            
+            A[i,j] += Sk_alpha * (Sk_cos * cos_kxkykz + Sk_sin * sin_kxkykz)
 
       # slab or wire correction
       if wirefac > 1.: A[i,j] += 2.*np.pi*Vinv*(r[i,2]*r[j,2]+r[i,1]*r[j,1])

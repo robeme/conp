@@ -1,7 +1,7 @@
 import numpy as np
 import math, itertools
 
-symflag = False
+symflag = False # symmetric electrodes?
 
 slabfac = 3.0
 wirefac = 1.0
@@ -34,13 +34,6 @@ kprefac = 2*np.pi*np.array([1./Lx,1./Ly,1./Lz])
 ksqmax = np.dot(kprefac*np.array([nx,ny,nz]),kprefac*np.array([nx,ny,nz]))
 kpoints = (2*nz+1)*(2*nx*ny+nx+ny)
 
-cos_kx = np.zeros([N,nx+1])
-sin_kx = np.zeros([N,nx+1])
-cos_ky = np.zeros([N,ny+1])
-sin_ky = np.zeros([N,ny+1])
-cos_kz = np.zeros([N,nz+1])
-sin_kz = np.zeros([N,nz+1])
-
 alpha = 0.1780932
 eta = 1.979
 
@@ -53,13 +46,19 @@ preSk = 8.0 * np.pi * Vinv
 
 selfcorr = (np.sqrt(2)*eta-2.*alpha)/np.sqrt(np.pi)
 
+# allocate some matrices 
+A = np.zeros([N,N]) 
+cos_kx = np.zeros([N,nx+1])
+sin_kx = np.zeros([N,nx+1])
+cos_ky = np.zeros([N,ny+1])
+sin_ky = np.zeros([N,ny+1])
+cos_kz = np.zeros([N,nz+1])
+sin_kz = np.zeros([N,nz+1])
+
 def main():
   
   # precompute k-space coeffs
   ewald_coeffs()
-
-  # allocate Aij
-  A = np.zeros([N,N]) 
 
   for i in range(N):
     
@@ -83,7 +82,9 @@ def main():
     
       if (i != j) & (dij < Rc): A[i,j] += ( math.erfc(alpha*dij) - math.erfc(etasqr2*dij) ) / dij 
 
-      # slab (or wire) correction
+    ######################################
+    ###   slab (or wire) correction    ###
+    ######################################
       if wirefac > 1.: A[i,j] += 2.*np.pi*Vinv*(r[i,2]*r[j,2]+r[i,1]*r[j,1])
       else: A[i,j] += 4.*np.pi*Vinv*r[i,2]*r[j,2]
     
@@ -120,25 +121,31 @@ def main():
             sin_kxky = sin_kx[i,l] * cos_ky[i,mabs] + cos_kx[i,l] * sin_ky[i,mabs] * sign_m
             cos_kxkykz_i = cos_kxky * cos_kz[i,nabs] - sin_kxky * sin_kz[i,nabs] * sign_n
             sin_kxkykz_i = sin_kxky * cos_kz[i,nabs] + cos_kxky * sin_kz[i,nabs] * sign_n
-            # TODO: no matter what this contribution is actually symmetric
-            for j in range(i,N) if symflag else range(N):
+            for j in range(i,N):
             
               cos_kxky = cos_kx[j,l] * cos_ky[j,mabs] - sin_kx[j,l] * sin_ky[j,mabs] * sign_m
               sin_kxky = sin_kx[j,l] * cos_ky[j,mabs] + cos_kx[j,l] * sin_ky[j,mabs] * sign_m
               cos_kxkykz_j = cos_kxky * cos_kz[j,nabs] - sin_kxky * sin_kz[j,nabs] * sign_n
               sin_kxkykz_j = sin_kxky * cos_kz[j,nabs] + cos_kxky * sin_kz[j,nabs] * sign_n
-            
-              A[i,j] += Sk_alpha * (cos_kxkykz_i*cos_kxkykz_j + sin_kxkykz_i*sin_kxkykz_j)
+              
+              pot_ij = Sk_alpha * (cos_kxkykz_i*cos_kxkykz_j + sin_kxkykz_i*sin_kxkykz_j)
+              
+              A[i,j] += pot_ij
+              
+              if not symflag and (i != j): A[j,i] += pot_ij
               
     ######################################
     ###        k=0 contribution        ###
     ######################################
   for i in range(N):
-    # TODO: no matter what this contribution is actually symmetric
-    for j in range(N):
+    for j in range(i,N):
        zij = r[j,2] - r[i,2]
        zijsq = zij*zij
-       A[i,j] -= 2.0*Axyinv * (sqrpialpha*np.exp(-zijsq*alphasq) + np.pi*zij*math.erf(zij*alpha))
+       potij = 2.0*Axyinv * (sqrpialpha*np.exp(-zijsq*alphasq) + np.pi*zij*math.erf(zij*alpha))
+       
+       A[i,j] -= pot_ij
+       
+       if not symflag and (i != j): A[j,i] -= pot_ij
       
   if symflag: 
     # copy upper triangle to lower

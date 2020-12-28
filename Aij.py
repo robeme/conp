@@ -1,101 +1,174 @@
 import numpy as np
-import math, itertools
+import math, itertools, sys
 
-symflag = False # symmetric electrodes?
+def main(argv):
 
-slabfac = 3.0
-wirefac = 1.0
-
-Rc = 12.0
-
-# points need to be sorted to which
-# electrode they belong and how 
-# they appear in the data file 
-# (compare points.data)
-r = np.array([[0.,0.,15.],
-              [0.,0.,10.],
-              [0.,0.,-15.],
-              [0.,0.,-10.]]) # 1 1 2 2
-N = len(r)
-Lx = 31.
-Ly = 31.*wirefac
-Lz = 31.*slabfac
-V = Lx*Ly*Lz
-Vinv = 1./V
-Axyinv = 1./(Lx*Ly)
-
-# k-space
-nx = 4
-ny = 4 
-nz = 9
-nmax = max([nx,ny,nz])
-
-kprefac = 2*np.pi*np.array([1./Lx,1./Ly,1./Lz])
-ksqmax = np.dot(kprefac*np.array([nx,ny,nz]),kprefac*np.array([nx,ny,nz]))
-kpoints = (2*nz+1)*(2*nx*ny+nx+ny)
-
-alpha = 0.1780932
-eta = 1.979
-
-# set some constants
-etasqr2 = eta/np.sqrt(2)
-alphasq = alpha**2
-alphasqinv = 1.0 / alphasq
-sqrpialpha = np.sqrt(np.pi)/alpha
-preSk = 8.0 * np.pi * Vinv
-
-selfcorr = (np.sqrt(2)*eta-2.*alpha)/np.sqrt(np.pi)
-
-# allocate some matrices 
-A = np.zeros([N,N]) 
-cos_kx = np.zeros([N,nx+1])
-sin_kx = np.zeros([N,nx+1])
-cos_ky = np.zeros([N,ny+1])
-sin_ky = np.zeros([N,ny+1])
-cos_kz = np.zeros([N,nz+1])
-sin_kz = np.zeros([N,nz+1])
-
-def main():
+  global wirefac, slabfac, expflag, symflag
+  global Rc, nx, ny, nz, nmax, ksqmax, kpoints, kprefac, alpha, eta
+  global Lx,Ly,Lz,V,Vinv,Axyinv,N, r
+  global A,cos_kx, sin_kx, cos_ky, sin_ky, cos_kz, sin_kz
   
-  # precompute k-space coeffs
-  ewald_coeffs()
+  symflag = False # symmetric electrodes?
+  expflag = False # use explicit expression for slab correction (k=0)
 
-  for i in range(N):
+  slabfac = 3.0
+  wirefac = 1.0
+  
+  # load structure
+  # points need to be sorted to which
+  # electrode they belong and how 
+  # they appear in the data file 
+  # (compare points.data)
+#  r = np.array([[0.,0.,15.],
+#                [0.,0.,10.],
+#                [0.,0.,-15.],
+#                [0.,0.,-10.]]) # 1 1 2 2
+#  Lxinp = 31.
+#  Lyinp = 31.
+#  Lzinp = 31.
+
+  r = np.loadtxt('electrodes.xyz', skiprows=2, usecols=(1,2,3), dtype=float) 
+  Lxinp = 6.440189199460001E+01  
+  Lyinp = 6.971769370200001E+01  
+  Lzinp = 2.400000000000000E+02
+  
+  N = len(r)
+  Lx = Lxinp
+  Ly = Lxinp*wirefac
+  Lz = Lxinp*slabfac
+  V = Lx*Ly*Lz
+  Vinv = 1./V
+  Axyinv = 1./(Lx*Ly)
+  
+  # k-space
+  Rc = 12.0
+  alpha = 0.1780932
+  eta = 1.979
+  nx = 4
+  ny = 4 
+  nz = 9
+  
+  # set some constants
+  nmax = max([nx,ny,nz])
+  kprefac = 2*np.pi*np.array([1./Lx,1./Ly,1./Lz])
+  ksqmax = np.dot(kprefac*np.array([nx,ny,nz]),kprefac*np.array([nx,ny,nz]))
+  kpoints = (2*nz+1)*(2*nx*ny+nx+ny)
+  
+  selfcorr = (np.sqrt(2)*eta-2.*alpha)/np.sqrt(np.pi)
+
+  etasqr2inv = eta/np.sqrt(2)
+  alphasq = alpha**2
+  alphasqinv = 1.0 / alphasq
+  sqrpialpha = np.sqrt(np.pi)/alpha
+  preSk = 8.0 * np.pi * Vinv
+  
+  # allocate some matrices 
+  A = np.zeros([N,N]) 
+  cos_kx = np.zeros([N,nx+1])
+  sin_kx = np.zeros([N,nx+1])
+  cos_ky = np.zeros([N,ny+1])
+  sin_ky = np.zeros([N,ny+1])
+  cos_kz = np.zeros([N,nz+1])
+  sin_kz = np.zeros([N,nz+1])
+
+  # process command line inputs
+  for ii,inp in enumerate(argv):
+    if '-h' in inp: help()
+    if '--help' in inp: help()
+    if '--explicit' in inp: expflag = True
+    if '--sym' in inp: symflag = True
+    if '--slab' in inp: slabfac = float(argv[ii+1])
+    if '--wire' in inp: wirefac = float(argv[ii+1])
+
+  # precompute k-space coeffs
+  print("  pre-computing k-space coeffs ...")
+  ewald_coeffs()
     
-    ######################################
-    ###        self correction         ###
-    ######################################
-    
+  ######################################
+  ###        self correction         ###
+  ######################################
+  
+  print("  self corrections ...")
+  for i in range(N):  
     A[i,i] += selfcorr
-    
+  
+  ######################################
+  ###     real-space contribution    ###
+  ######################################
+  
+  print("  real-space contributions ...")    
+  for i in range(N):
+    print('\r%d/%d' % (i,N), end='', flush=True)
     for j in range(i,N) if symflag else range(N):
       # slab or wire pbc distances
       dx = np.mod(r[i,0]-r[j,0], Lx*.5)
       dy = r[i,1]-r[j,1] if wirefac > 1. else np.mod(r[i,1]-r[j,1], Ly*.5)
       dz = r[i,2]-r[j,2]
       rij = np.array([dx,dy,dz])
-      dij = np.linalg.norm(rij)
+      dij = np.sqrt(dx*dx+dy*dy+dz*dz)
       
-    ######################################
-    ###     real-space contribution    ###
-    ######################################
-    
-      if (i != j) & (dij < Rc): A[i,j] += ( math.erfc(alpha*dij) - math.erfc(etasqr2*dij) ) / dij 
 
-    ######################################
-    ###   slab (or wire) correction    ###
-    ######################################
-      if wirefac > 1.: A[i,j] += 2.*np.pi*Vinv*(r[i,2]*r[j,2]+r[i,1]*r[j,1])
-      else: A[i,j] += 4.*np.pi*Vinv*r[i,2]*r[j,2]
+      if (i != j) & (dij < Rc): A[i,j] += ( math.erfc(alpha*dij) - math.erfc(etasqr2inv*dij) ) / dij 
+  print('')
+  
+  ######################################
+  ###   slab (or wire) correction    ###
+  ######################################
+  
+  print("  slab/wire corrections ...") 
+  
+  if (wirefac > 1.) and expflag:  
+  
+    sys.exit("ERROR: explicit wire correction not (yet) implemented!")
     
-    ######################################
-    ###      k-space contribution      ###
-    ######################################
+  elif (wirefac > 1.) and not expflag:
+  
+    print("  correcting for (implicit) wire geometry ...")
+    
+    for i in range(N):
+      for j in range(i,N) if symflag else range(N):
+        pot_ij = 2.*np.pi*Vinv*(r[i,2]*r[j,2]+r[i,1]*r[j,1])
+        
+        A[i,j] += pot_ij
+        if not symflag and (i != j): A[j,i] += pot_ij
+      
+  # explicit slab correction due analytical integration (slower but more accurate)
+  if (slabfac > 1.) and expflag:
+  
+    print("  correcting for (explicit) slab geometry ...")
+    
+    for i in range(N):
+      for j in range(i,N):
+         zij = abs(r[j,2] - r[i,2])
+         zijsq = zij*zij
+         pot_ij = 2.0*Axyinv * (sqrpialpha*np.exp(-zijsq*alphasq) + np.pi*zij*math.erf(zij*alpha))
+         
+         A[i,j] -= pot_ij
+         if i != j: A[j,i] -= pot_ij
+         
+  elif (slabfac > 1.) and not expflag: 
+  
+    print("  correcting for (implicit) slab geometry ...")
+    
+    for i in range(N):
+      for j in range(i,N):
+        pot_ij = 4.*np.pi*Vinv*r[i,2]*r[j,2]
+        
+        A[i,j] += pot_ij
+        if i != j: A[j,i] += pot_ij
+    
+  ######################################
+  ###      k-space contribution      ###
+  ######################################
+  
+  print("  k-space contributions ...")    
     
   # get reciprocal lattice for 2DPBC (see metalwalls doc)
+  status = 0
   for l in range(0,nx+1):
     for m in range(-ny,ny+1) if l > 0 else range(1,ny+1):
       for n in range(-nz,nz+1):
+        print('\r%d/%d' % (status,kpoints), end='', flush=True)
        
         # kx = l * twopi / Lx
         kx = l*kprefac[0]
@@ -104,7 +177,7 @@ def main():
         # kz = N * twopi / Lz
         kz = n*kprefac[2]
         
-        ksq = np.dot([kx,ky,kz],[kx,ky,kz])
+        ksq = kx*kx + ky*ky + kz*kz
         
         if ksq <= ksqmax:
         
@@ -131,28 +204,17 @@ def main():
               pot_ij = Sk_alpha * (cos_kxkykz_i*cos_kxkykz_j + sin_kxkykz_i*sin_kxkykz_j)
               
               A[i,j] += pot_ij
-              
               if not symflag and (i != j): A[j,i] += pot_ij
-              
-    ######################################
-    ###        k=0 contribution        ###
-    ######################################
-  for i in range(N):
-    for j in range(i,N):
-       zij = r[j,2] - r[i,2]
-       zijsq = zij*zij
-       potij = 2.0*Axyinv * (sqrpialpha*np.exp(-zijsq*alphasq) + np.pi*zij*math.erf(zij*alpha))
-       
-       A[i,j] -= pot_ij
-       
-       if not symflag and (i != j): A[j,i] -= pot_ij
+        status += 1                  
+  print('')
       
   if symflag: 
     # copy upper triangle to lower
     iu = np.triu_indices(N,1)
     il = (iu[1],iu[0])
     A[il]=A[iu]
-    
+  
+  np.savetxt('A.mat',A)  
   print(A)
   
 def ewald_coeffs():
@@ -174,9 +236,21 @@ def ewald_coeffs():
     for i in range(N):
       cos_kz[i,k] = np.cos(k*kprefac[2]*r[i,2])
       sin_kz[i,k] = np.sin(k*kprefac[2]*r[i,2])
+      
+def help():
+  print('usage: python Aij.py')
+  print('')
+  print('  -h           print this message')
+  print('')
+  print('  --explicit   turn on explicit slab/wire correction [default: %r]' % expflag)
+  print('  --symmetric  symmetric electrodes [default: %r]' % symflag)
+  print('  --slab       slab volume factor [default: %.1f]' % slabfac)
+  print('  --wire       wire volume factor [default: %.1f]' % wirefac)
+  print('  --help       print this message')
+  sys.exit()
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv)
 
 
 #  # get reciprocal lattice for 3DPBC (see metalwalls doc)    

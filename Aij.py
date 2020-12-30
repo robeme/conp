@@ -27,34 +27,36 @@ def main(argv):
 #  Lyinp = 31.
 #  Lzinp = 31.
 
-  r = np.loadtxt('electrodes.xyz', skiprows=2, usecols=(1,2,3), dtype=float) 
-  Lxinp = 6.440189199460001E+01  
-  Lyinp = 6.971769370200001E+01  
-  Lzinp = 2.400000000000000E+02
+  r = np.loadtxt('graphene.inpt', skiprows=7, usecols=(1,2,3), dtype=float) 
+  Lxinp = 6.440189199460001E+01    
+  Lyinp = 6.971769370200001E+01
+  Lzinp = 2.510765832095E+02
   
   N = len(r)
   Lx = Lxinp
   Ly = Lxinp*wirefac
   Lz = Lxinp*slabfac
-  V = Lx*Ly*Lz
+  V = Lxinp*Lyinp*Lzinp
   Vinv = 1./V
-  Axyinv = 1./(Lx*Ly)
+  Axyinv = 1./(Lxinp*Lyinp)
   
   # k-space
-  Rc = 12.0
-  alpha = 0.1780932
-  eta = 1.979
-  nx = 4
-  ny = 4 
-  nz = 9
+  Rc = 24.0
+  alpha = 1.20292E-01
+  eta = 0.955234657
+  nx = 8
+  ny = 9 
+  nz = 32
   
   # set some constants
   nmax = max([nx,ny,nz])
-  kprefac = 2*np.pi*np.array([1./Lx,1./Ly,1./Lz])
+  kprefac = 2*np.pi*np.array([1./Lxinp,1./Lyinp,1./Lzinp])
   ksqmax = np.dot(kprefac*np.array([nx,ny,nz]),kprefac*np.array([nx,ny,nz]))
   kpoints = (2*nz+1)*(2*nx*ny+nx+ny)
   
   selfcorr = (np.sqrt(2)*eta-2.*alpha)/np.sqrt(np.pi)
+
+  Rcsq = Rc*Rc
 
   etasqr2inv = eta/np.sqrt(2)
   alphasq = alpha**2
@@ -91,25 +93,33 @@ def main(argv):
   print("  self corrections ...")
   for i in range(N):  
     A[i,i] += selfcorr
+  Aself = A*1.
+  np.savetxt('A.self',Aself)
+  
   
   ######################################
   ###     real-space contribution    ###
   ######################################
   
   print("  real-space contributions ...")    
+  
   for i in range(N):
-    print('\r%d/%d' % (i,N), end='', flush=True)
+    print('\r(%d/%d)' % (i+1,N), end='', flush=True)
     for j in range(i,N) if symflag else range(N):
-      # slab or wire pbc distances
-      dx = np.mod(r[i,0]-r[j,0], Lx*.5)
-      dy = r[i,1]-r[j,1] if wirefac > 1. else np.mod(r[i,1]-r[j,1], Ly*.5)
-      dz = r[i,2]-r[j,2]
-      rij = np.array([dx,dy,dz])
-      dij = np.sqrt(dx*dx+dy*dy+dz*dz)
+      # TODO: probably faster for 1DPBC using a seperate 1DPBC_sr function rather than if wirefac == 1.0
+      dx = r[j,0] - r[i,0]
+      dy = r[j,1] - r[i,1]
+      dz = r[j,2] - r[i,2]
+      dx = dx - int(round(dx / Lxinp)) * Lxinp
+      if wirefac == 1.0: dy = dy - int(round(dy / Lyinp)) * Lyinp
+      dijsq = dx*dx+dy*dy+dz*dz
       
-
-      if (i != j) & (dij < Rc): A[i,j] += ( math.erfc(alpha*dij) - math.erfc(etasqr2inv*dij) ) / dij 
+      if (i != j) & (dijsq < Rcsq): 
+        dij = np.sqrt(dijsq)
+        A[i,j] += ( math.erfc(alpha*dij) - math.erfc(etasqr2inv*dij) ) / dij 
   print('')
+  Areal = A-Aself
+  np.savetxt('A.sr',Areal)
   
   ######################################
   ###   slab (or wire) correction    ###
@@ -139,7 +149,7 @@ def main(argv):
     
     for i in range(N):
       for j in range(i,N):
-         zij = abs(r[j,2] - r[i,2])
+         zij = r[j,2] - r[i,2] # here might be a small glitch... should be abs(...) according to metalwalls ewald doc
          zijsq = zij*zij
          pot_ij = 2.0*Axyinv * (sqrpialpha*np.exp(-zijsq*alphasq) + np.pi*zij*math.erf(zij*alpha))
          
@@ -156,6 +166,9 @@ def main(argv):
         
         A[i,j] += pot_ij
         if i != j: A[j,i] += pot_ij
+  
+  Aslab = A-Aself-Areal
+  np.savetxt('A.k0',Aslab)
     
   ######################################
   ###      k-space contribution      ###
@@ -164,17 +177,17 @@ def main(argv):
   print("  k-space contributions ...")    
     
   # get reciprocal lattice for 2DPBC (see metalwalls doc)
-  status = 0
+  status = 1
   for l in range(0,nx+1):
     for m in range(-ny,ny+1) if l > 0 else range(1,ny+1):
       for n in range(-nz,nz+1):
-        print('\r%d/%d' % (status,kpoints), end='', flush=True)
+        print('\r(%d/%d)' % (status,kpoints), end='', flush=True)
        
-        # kx = l * twopi / Lx
+        # kx = l * twopi / Lxinp
         kx = l*kprefac[0]
-        # ky = m * twopi / Ly
+        # ky = m * twopi / Lyinp
         ky = m*kprefac[1]
-        # kz = N * twopi / Lz
+        # kz = N * twopi / Lzinp
         kz = n*kprefac[2]
         
         ksq = kx*kx + ky*ky + kz*kz
@@ -207,6 +220,9 @@ def main(argv):
               if not symflag and (i != j): A[j,i] += pot_ij
         status += 1                  
   print('')
+  
+  Ak = A-Aself-Areal-Aslab
+  np.savetxt('A.lr',Ak)
       
   if symflag: 
     # copy upper triangle to lower

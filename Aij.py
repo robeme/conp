@@ -1,5 +1,7 @@
+# units are same as in metalwalls
+
 import numpy as np
-import math, itertools, sys
+import math, sys
 
 def main(argv):
 
@@ -13,21 +15,8 @@ def main(argv):
 
   slabfac = 3.0
   wirefac = 1.0
-  
-  # load structure
-  # points need to be sorted to which
-  # electrode they belong and how 
-  # they appear in the data file 
-  # (compare points.data)
-#  r = np.array([[0.,0.,15.],
-#                [0.,0.,10.],
-#                [0.,0.,-15.],
-#                [0.,0.,-10.]]) # 1 1 2 2
-#  Lxinp = 31.
-#  Lyinp = 31.
-#  Lzinp = 31.
 
-  r = np.loadtxt('graphene.inpt', skiprows=7, usecols=(1,2,3), dtype=float) 
+  r = np.loadtxt('metalwalls/plates.xyz', skiprows=2, usecols=(1,2,3), dtype=float) 
   Lxinp = 6.440189199460001E+01    
   Lyinp = 6.971769370200001E+01
   Lzinp = 2.510765832095E+02
@@ -74,16 +63,17 @@ def main(argv):
   sin_kz = np.zeros([N,nz+1])
 
   # process command line inputs
-  for ii,inp in enumerate(argv):
+  for ninp,inp in enumerate(argv):
     if '-h' in inp: help()
     if '--help' in inp: help()
     if '--explicit' in inp: expflag = True
     if '--sym' in inp: symflag = True
-    if '--slab' in inp: slabfac = float(argv[ii+1])
-    if '--wire' in inp: wirefac = float(argv[ii+1])
+    if '--slab' in inp: slabfac = float(argv[ninp+1])
+    if '--wire' in inp: wirefac = float(argv[ninp+1])
 
   # precompute k-space coeffs
   print("  pre-computing k-space coeffs ...")
+  
   ewald_coeffs()
     
   ######################################
@@ -91,6 +81,7 @@ def main(argv):
   ######################################
   
   print("  self corrections ...")
+  
   for i in range(N):  
     A[i,i] += selfcorr
   Aself = A*1.
@@ -110,13 +101,17 @@ def main(argv):
       dx = r[j,0] - r[i,0]
       dy = r[j,1] - r[i,1]
       dz = r[j,2] - r[i,2]
+      
+      # minimum image convention for slab/wire geometry
       dx = dx - int(round(dx / Lxinp)) * Lxinp
       if wirefac == 1.0: dy = dy - int(round(dy / Lyinp)) * Lyinp
+      
       dijsq = dx*dx+dy*dy+dz*dz
       
       if (i != j) & (dijsq < Rcsq): 
         dij = np.sqrt(dijsq)
         A[i,j] += ( math.erfc(alpha*dij) - math.erfc(etasqr2inv*dij) ) / dij 
+        
   print('')
   Areal = A-Aself
   np.savetxt('A.sr',Areal)
@@ -128,44 +123,36 @@ def main(argv):
   print("  slab/wire corrections ...") 
   
   if (wirefac > 1.) and expflag:  
-  
+    print("  correcting for (explicit) wire geometry ...")
     sys.exit("ERROR: explicit wire correction not (yet) implemented!")
-    
   elif (wirefac > 1.) and not expflag:
-  
     print("  correcting for (implicit) wire geometry ...")
-    
-    for i in range(N):
-      for j in range(i,N) if symflag else range(N):
-        pot_ij = 2.*np.pi*Vinv*(r[i,2]*r[j,2]+r[i,1]*r[j,1])
-        
-        A[i,j] += pot_ij
-        if not symflag and (i != j): A[j,i] += pot_ij
-      
+    sys.exit("ERROR: implicit wire correction not (yet) implemented!")
+#    for i in range(N):
+#      for j in range(i,N) if symflag else range(N):
+#        pot_ij = 2.*np.pi*Vinv*(r[i,2]*r[j,2]+r[i,1]*r[j,1])
+#        
+#        A[i,j] += pot_ij
+#        if not symflag and (i != j): A[j,i] += pot_ij
   # explicit slab correction due analytical integration (slower but more accurate)
   if (slabfac > 1.) and expflag:
-  
     print("  correcting for (explicit) slab geometry ...")
-    
     for i in range(N):
       for j in range(i,N):
          zij = r[j,2] - r[i,2] # here might be a small glitch... should be abs(...) according to metalwalls ewald doc
          zijsq = zij*zij
          pot_ij = 2.0*Axyinv * (sqrpialpha*np.exp(-zijsq*alphasq) + np.pi*zij*math.erf(zij*alpha))
-         
          A[i,j] -= pot_ij
-         if i != j: A[j,i] -= pot_ij
-         
+         if not symflag and (i != j): A[j,i] -= pot_ij 
   elif (slabfac > 1.) and not expflag: 
-  
     print("  correcting for (implicit) slab geometry ...")
-    
-    for i in range(N):
-      for j in range(i,N):
-        pot_ij = 4.*np.pi*Vinv*r[i,2]*r[j,2]
-        
-        A[i,j] += pot_ij
-        if i != j: A[j,i] += pot_ij
+    sys.exit("ERROR: implicit slab correction not (yet) implemented!")
+#    for i in range(N):
+#      for j in range(i,N):
+#        pot_ij = 4.*np.pi*Vinv*r[i,2]*r[j,2]
+#        
+#        A[i,j] += pot_ij
+#        if i != j: A[j,i] += pot_ij
   
   Aslab = A-Aself-Areal
   np.savetxt('A.k0',Aslab)
@@ -177,11 +164,11 @@ def main(argv):
   print("  k-space contributions ...")    
     
   # get reciprocal lattice for 2DPBC (see metalwalls doc)
-  status = 1
+  step = 1
   for l in range(0,nx+1):
     for m in range(-ny,ny+1) if l > 0 else range(1,ny+1):
       for n in range(-nz,nz+1):
-        print('\r(%d/%d)' % (status,kpoints), end='', flush=True)
+        print('\r(%d/%d)' % (step,kpoints), end='', flush=True)
        
         # kx = l * twopi / Lxinp
         kx = l*kprefac[0]
@@ -218,7 +205,7 @@ def main(argv):
               
               A[i,j] += pot_ij
               if not symflag and (i != j): A[j,i] += pot_ij
-        status += 1                  
+        step += 1                  
   print('')
   
   Ak = A-Aself-Areal-Aslab
@@ -267,6 +254,47 @@ def help():
 
 if __name__ == "__main__":
     main(sys.argv)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 #  # get reciprocal lattice for 3DPBC (see metalwalls doc)    

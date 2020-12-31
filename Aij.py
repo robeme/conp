@@ -5,41 +5,55 @@ import math, sys
 
 def main(argv):
 
-  global wirefac, slabfac, expflag, symflag
+  global wirefac, slabfac, explflag, symflag
   global Rc, nx, ny, nz, nmax, ksqmax, kpoints, kprefac, alpha, eta
   global Lx,Ly,Lz,V,Vinv,Axyinv,N, r
   global A,cos_kx, sin_kx, cos_ky, sin_ky, cos_kz, sin_kz
   
   symflag = False # symmetric electrodes?
-  expflag = False # use explicit expression for slab correction (k=0)
+  explflag = False # use explicit expression for slab correction (k=0)
 
   slabfac = 3.0
   wirefac = 1.0
-
+  
   r = np.loadtxt('metalwalls/plates.xyz', skiprows=2, usecols=(1,2,3), dtype=float) 
-  Lxinp = 6.440189199460001E+01    
-  Lyinp = 6.971769370200001E+01
-  Lzinp = 2.510765832095E+02
+  Lx = 6.440189199460001E+01    
+  Ly = 6.971769370200001E+01
+  Lz = 2.510765832095E+02
   
-  N = len(r)
-  Lx = Lxinp
-  Ly = Lxinp*wirefac
-  Lz = Lxinp*slabfac
-  V = Lxinp*Lyinp*Lzinp
-  Vinv = 1./V
-  Axyinv = 1./(Lxinp*Lyinp)
-  
-  # k-space
+  # process command line inputs
+  for ninp,inp in enumerate(argv):
+    if '-h' in inp: help()
+    if '--help' in inp: help()
+    if '--explicit' in inp: 
+      explflag = True
+      slabfac = 1.0 # no need for slab factor if we use explict slab correction
+      wirefac = 1.0 # no need for wire factor if we use explict wire correction
+    if '--sym' in inp: symflag = True
+    if '--slab' in inp: slabfac = float(argv[ninp+1])
+    if '--wire' in inp: wirefac = float(argv[ninp+1])
+
+  # k-space parameters
   Rc = 24.0
   alpha = 1.20292E-01
   eta = 0.955234657
+  # define nx, ny and nz BEFORE scaling box dimensions
   nx = 8
   ny = 9 
   nz = 32
   
+  if wirefac > 1.: 
+    Ly *= wirefac
+    Lz *= wirefac
+  if slabfac > 1.: Lz *= slabfac
+
+  N = len(r)
+  V = Lx*Ly*Lz
+  Vinv = 1./V
+  
   # set some constants
   nmax = max([nx,ny,nz])
-  kprefac = 2*np.pi*np.array([1./Lxinp,1./Lyinp,1./Lzinp])
+  kprefac = 2*np.pi*np.array([1./Lx,1./Ly,1./Lz])
   ksqmax = np.dot(kprefac*np.array([nx,ny,nz]),kprefac*np.array([nx,ny,nz]))
   kpoints = (2*nz+1)*(2*nx*ny+nx+ny)
   
@@ -53,7 +67,7 @@ def main(argv):
   sqrpialpha = np.sqrt(np.pi)/alpha
   preSk = 8.0 * np.pi * Vinv
   
-  # allocate some matrices 
+  # allocate matrices 
   A = np.zeros([N,N]) 
   cos_kx = np.zeros([N,nx+1])
   sin_kx = np.zeros([N,nx+1])
@@ -61,16 +75,7 @@ def main(argv):
   sin_ky = np.zeros([N,ny+1])
   cos_kz = np.zeros([N,nz+1])
   sin_kz = np.zeros([N,nz+1])
-
-  # process command line inputs
-  for ninp,inp in enumerate(argv):
-    if '-h' in inp: help()
-    if '--help' in inp: help()
-    if '--explicit' in inp: expflag = True
-    if '--sym' in inp: symflag = True
-    if '--slab' in inp: slabfac = float(argv[ninp+1])
-    if '--wire' in inp: wirefac = float(argv[ninp+1])
-
+  
   # precompute k-space coeffs
   print("  pre-computing k-space coeffs ...")
   
@@ -87,7 +92,6 @@ def main(argv):
   Aself = A*1.
   np.savetxt('A.self',Aself)
   
-  
   ######################################
   ###     real-space contribution    ###
   ######################################
@@ -103,8 +107,8 @@ def main(argv):
       dz = r[j,2] - r[i,2]
       
       # minimum image convention for slab/wire geometry
-      dx = dx - int(round(dx / Lxinp)) * Lxinp
-      if wirefac == 1.0: dy = dy - int(round(dy / Lyinp)) * Lyinp
+      dx = dx - int(round(dx / Lx)) * Lx
+      if wirefac == 1.0: dy = dy - int(round(dy / Ly)) * Ly
       
       dijsq = dx*dx+dy*dy+dz*dz
       
@@ -122,10 +126,10 @@ def main(argv):
   
   print("  slab/wire corrections ...") 
   
-  if (wirefac > 1.) and expflag:  
+  if (wirefac > 1.) and explflag:  
     print("  correcting for (explicit) wire geometry ...")
     sys.exit("ERROR: explicit wire correction not (yet) implemented!")
-  elif (wirefac > 1.) and not expflag:
+  elif (wirefac > 1.) and not explflag:
     print("  correcting for (implicit) wire geometry ...")
     sys.exit("ERROR: implicit wire correction not (yet) implemented!")
 #    for i in range(N):
@@ -135,8 +139,9 @@ def main(argv):
 #        A[i,j] += pot_ij
 #        if not symflag and (i != j): A[j,i] += pot_ij
   # explicit slab correction due analytical integration (slower but more accurate)
-  if (slabfac > 1.) and expflag:
-    print("  correcting for (explicit) slab geometry ...")
+  if (slabfac > 1.) and explflag:
+    print("  EW2D correction for slab geometry ...")
+    Axyinv = 1./(Lx*Ly)
     for i in range(N):
       for j in range(i,N):
          zij = r[j,2] - r[i,2] # here might be a small glitch... should be abs(...) according to metalwalls ewald doc
@@ -144,15 +149,15 @@ def main(argv):
          pot_ij = 2.0*Axyinv * (sqrpialpha*np.exp(-zijsq*alphasq) + np.pi*zij*math.erf(zij*alpha))
          A[i,j] -= pot_ij
          if not symflag and (i != j): A[j,i] -= pot_ij 
-  elif (slabfac > 1.) and not expflag: 
-    print("  correcting for (implicit) slab geometry ...")
-    sys.exit("ERROR: implicit slab correction not (yet) implemented!")
-#    for i in range(N):
-#      for j in range(i,N):
-#        pot_ij = 4.*np.pi*Vinv*r[i,2]*r[j,2]
-#        
-#        A[i,j] += pot_ij
-#        if i != j: A[j,i] += pot_ij
+  elif (slabfac > 1.) and not explflag: 
+    print("  EW3DC correction for slab geometry ...")
+    for i in range(N):
+      prefac = 4.*np.pi*Vinv*r[i,2]
+      for j in range(i,N):
+        pot_ij = prefac*r[j,2]
+        
+        A[i,j] += pot_ij
+        if not symflag and (i != j): A[j,i] += pot_ij
   
   Aslab = A-Aself-Areal
   np.savetxt('A.k0',Aslab)
@@ -170,11 +175,11 @@ def main(argv):
       for n in range(-nz,nz+1):
         print('\r(%d/%d)' % (step,kpoints), end='', flush=True)
        
-        # kx = l * twopi / Lxinp
+        # kx = l * twopi / Lx
         kx = l*kprefac[0]
-        # ky = m * twopi / Lyinp
+        # ky = m * twopi / Ly
         ky = m*kprefac[1]
-        # kz = N * twopi / Lzinp
+        # kz = N * twopi / Lz
         kz = n*kprefac[2]
         
         ksq = kx*kx + ky*ky + kz*kz
@@ -245,7 +250,7 @@ def help():
   print('')
   print('  -h           print this message')
   print('')
-  print('  --explicit   turn on explicit slab/wire correction [default: %r]' % expflag)
+  print('  --explicit   turn on explicit slab/wire correction [default: %r]' % explflag)
   print('  --symmetric  symmetric electrodes [default: %r]' % symflag)
   print('  --slab       slab volume factor [default: %.1f]' % slabfac)
   print('  --wire       wire volume factor [default: %.1f]' % wirefac)

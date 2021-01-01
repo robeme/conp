@@ -5,15 +5,18 @@ import math, sys
 
 def main(argv):
 
-  global wirefac, slabfac, explflag, symflag
+  global wirefac, slabfac, explflag, symflag, slabflag, wireflag, preflag
   global Rc, nx, ny, nz, nmax, ksqmax, kpoints, kprefac, alpha, eta
-  global Lx,Ly,Lz,V,Vinv,Axyinv,N, r
+  global Lx,Ly,Lz,V,Vinv,Axyinv,N,r
   global A,cos_kx, sin_kx, cos_ky, sin_ky, cos_kz, sin_kz
   
   symflag = False # symmetric electrodes?
-  explflag = False # use explicit expression for slab correction (k=0)
+  explflag = True # use explicit expression for slab correction (k=0)
+  slabflag = False
+  wireflag = False
+  preflag = True # should ewald terms be pre-computed for speed?
 
-  slabfac = 3.0
+  slabfac = 1.0
   wirefac = 1.0
   
   r = np.loadtxt('metalwalls/plates.xyz', skiprows=2, usecols=(1,2,3), dtype=float) 
@@ -21,18 +24,29 @@ def main(argv):
   Ly = 6.971769370200001E+01
   Lz = 2.510765832095E+02
   
+  # wrap coordinates into box with origin at lower left
+  for i,x in enumerate(r[:,0]): r[i,0] = x - np.floor(x / Lx) * Lx
+  for i,y in enumerate(r[:,1]): r[i,1] = y - np.floor(y / Ly) * Ly
+  for i,z in enumerate(r[:,2]): r[i,2] = z - np.floor(z / Lz) * Lz
+  
   # process command line inputs
   for ninp,inp in enumerate(argv):
     if '-h' in inp: help()
+    if '-sf' in inp: slabfac = float(argv[ninp+1])
+    if '-wf' in inp: wirefac = float(argv[ninp+1])
     if '--help' in inp: help()
-    if '--explicit' in inp: 
-      explflag = True
-      slabfac = 1.0 # no need for slab factor if we use explict slab correction
-      wirefac = 1.0 # no need for wire factor if we use explict wire correction
+    if '--exp' in inp: explflag = False
     if '--sym' in inp: symflag = True
-    if '--slab' in inp: slabfac = float(argv[ninp+1])
-    if '--wire' in inp: wirefac = float(argv[ninp+1])
-
+    if '--slab' in inp: slabflag = True
+    if '--wire' in inp: wireflag = True
+    if '--pre' in inp: preflag = False
+    
+  # user error handling  
+  if slabflag and wireflag: sys.exit("ERROR: can't use slab and wire correction at same time!")
+  if slabflag and not explflag and slabfac <= 1.0: sys.exit("ERROR: slab factor is too small (at lead > 3.0)!")
+  if wireflag and not explflag and wirefac <= 1.0: sys.exit("ERROR: wire factor is too small (at lead > 3.0)!")
+  if (slabfac > 1.0 or wirefac > 1.0) and explflag: sys.exit("ERROR: can't use explicit slab and wire correction with slab/wire factor > 1.0!")
+  
   # k-space parameters
   Rc = 24.0
   alpha = 1.20292E-01
@@ -42,10 +56,11 @@ def main(argv):
   ny = 9 
   nz = 32
   
-  if wirefac > 1.: 
+  if wireflag: 
     Ly *= wirefac
     Lz *= wirefac
-  if slabfac > 1.: Lz *= slabfac
+  if slabflag: 
+    Lz *= slabfac
 
   N = len(r)
   V = Lx*Ly*Lz
@@ -65,7 +80,9 @@ def main(argv):
   alphasq = alpha**2
   alphasqinv = 1.0 / alphasq
   sqrpialpha = np.sqrt(np.pi)/alpha
-  preSk = 8.0 * np.pi * Vinv
+  preSk = 8.*np.pi*Vinv
+  preM = 4./3.*np.pi
+  preWire = 2.*np.pi*Vinv
   
   # allocate matrices 
   A = np.zeros([N,N]) 
@@ -78,15 +95,13 @@ def main(argv):
   
   # precompute k-space coeffs
   print("  pre-computing k-space coeffs ...")
-  
-  ewald_coeffs()
+  if preflag: ewald_coeffs()
     
   ######################################
   ###        self correction         ###
   ######################################
   
-  print("  self corrections ...")
-  
+  print("  calculating self corrections ...")
   for i in range(N):  
     A[i,i] += selfcorr
   Aself = A*1.
@@ -96,19 +111,17 @@ def main(argv):
   ###     real-space contribution    ###
   ######################################
   
-  print("  real-space contributions ...")    
-  
+  print("  calculating real-space contributions ...")    
   for i in range(N):
     print('\r(%d/%d)' % (i+1,N), end='', flush=True)
     for j in range(i,N) if symflag else range(N):
-      # TODO: probably faster for 1DPBC using a seperate 1DPBC_sr function rather than if wirefac == 1.0
       dx = r[j,0] - r[i,0]
       dy = r[j,1] - r[i,1]
       dz = r[j,2] - r[i,2]
       
       # minimum image convention for slab/wire geometry
       dx = dx - int(round(dx / Lx)) * Lx
-      if wirefac == 1.0: dy = dy - int(round(dy / Ly)) * Ly
+      if wireflag: dy = dy - int(round(dy / Ly)) * Ly
       
       dijsq = dx*dx+dy*dy+dz*dz
       
@@ -124,41 +137,43 @@ def main(argv):
   ###   slab (or wire) correction    ###
   ######################################
   
-  print("  slab/wire corrections ...") 
+  print("  calculating slab/wire corrections ...") 
   
-  if (wirefac > 1.) and explflag:  
-    print("  correcting for (explicit) wire geometry ...")
-    sys.exit("ERROR: explicit wire correction not (yet) implemented!")
-  elif (wirefac > 1.) and not explflag:
-    print("  correcting for (implicit) wire geometry ...")
-    sys.exit("ERROR: implicit wire correction not (yet) implemented!")
-#    for i in range(N):
-#      for j in range(i,N) if symflag else range(N):
-#        pot_ij = 2.*np.pi*Vinv*(r[i,2]*r[j,2]+r[i,1]*r[j,1])
-#        
-#        A[i,j] += pot_ij
-#        if not symflag and (i != j): A[j,i] += pot_ij
-  # explicit slab correction due analytical integration (slower but more accurate)
-  if (slabfac > 1.) and explflag:
-    print("  EW2D correction for slab geometry ...")
-    Axyinv = 1./(Lx*Ly)
-    for i in range(N):
-      for j in range(i,N):
-         zij = r[j,2] - r[i,2] # here might be a small glitch... should be abs(...) according to metalwalls ewald doc
-         zijsq = zij*zij
-         pot_ij = 2.0*Axyinv * (sqrpialpha*np.exp(-zijsq*alphasq) + np.pi*zij*math.erf(zij*alpha))
-         A[i,j] -= pot_ij
-         if not symflag and (i != j): A[j,i] -= pot_ij 
-  elif (slabfac > 1.) and not explflag: 
-    print("  EW3DC correction for slab geometry ...")
-    for i in range(N):
-      prefac = 4.*np.pi*Vinv*r[i,2]
-      for j in range(i,N):
-        pot_ij = prefac*r[j,2]
-        
-        A[i,j] += pot_ij
-        if not symflag and (i != j): A[j,i] += pot_ij
-  
+  if wireflag:  
+    if explflag:
+      print("  - EW1D slab correction")
+      sys.exit("ERROR: explicit wire correction not (yet) implemented!")
+    else:
+      print("  - EW3DC wire correction")
+      sys.exit("ERROR: implicit wire correction not (yet) implemented!")
+      for i in range(N):
+        yprefac = preWire*r[i,1]
+        zprefac = preWire*r[i,2]
+        for j in range(i,N) if symflag else range(N):
+          pot_ij = zprefac*r[j,2]+yprefac*r[j,1]
+          A[i,j] += pot_ij
+          if not symflag and (i != j): A[j,i] += pot_ij
+
+  if slabflag:
+    if explflag:
+      print("  - using EW2D slab correction")
+      Axyinv = 1./(Lx*Ly)
+      for i in range(N):
+        for j in range(i,N):
+           zij = r[j,2] - r[i,2] # here might be a small glitch... should be abs(...) according to metalwalls ewald doc
+           zijsq = zij*zij
+           pot_ij = 2.0*Axyinv * (sqrpialpha*np.exp(-zijsq*alphasq) + np.pi*zij*math.erf(zij*alpha))
+           A[i,j] -= pot_ij
+           if not symflag and (i != j): A[j,i] -= pot_ij 
+    else:
+      print("  - using EW3DC slab correction")
+      for i in range(N):
+        prefac = 4.*np.pi*r[i,2]
+        for j in range(i,N):
+          pot_ij = prefac*r[j,2] - preM*np.dot(r[i,:],r[j,:])
+          A[i,j] += pot_ij
+          if not symflag and (i != j): A[j,i] += pot_ij
+    
   Aslab = A-Aself-Areal
   np.savetxt('A.k0',Aslab)
     
@@ -166,53 +181,142 @@ def main(argv):
   ###      k-space contribution      ###
   ######################################
   
-  print("  k-space contributions ...")    
+  print("  calculating k-space contributions ... ")    
+  if preflag:
+    print("  - with precomputation")
+    # get reciprocal lattice for 2DPBC (see metalwalls doc)
+    step = 1
     
-  # get reciprocal lattice for 2DPBC (see metalwalls doc)
-  step = 1
-  for l in range(0,nx+1):
-    for m in range(-ny,ny+1) if l > 0 else range(1,ny+1):
-      for n in range(-nz,nz+1):
-        print('\r(%d/%d)' % (step,kpoints), end='', flush=True)
-       
-        # kx = l * twopi / Lx
-        kx = l*kprefac[0]
-        # ky = m * twopi / Ly
-        ky = m*kprefac[1]
-        # kz = N * twopi / Lz
-        kz = n*kprefac[2]
-        
-        ksq = kx*kx + ky*ky + kz*kz
-        
-        if ksq <= ksqmax:
-        
-          mabs = abs(m)
-          sign_m = np.sign(m)
-          nabs = abs(n)
-          sign_n = np.sign(n)
-          
-          Sk_alpha = preSk * np.exp(-0.25 * alphasqinv * ksq) / ksq
-          
-          for i in range(N):
-          
-            cos_kxky = cos_kx[i,l] * cos_ky[i,mabs] - sin_kx[i,l] * sin_ky[i,mabs] * sign_m
-            sin_kxky = sin_kx[i,l] * cos_ky[i,mabs] + cos_kx[i,l] * sin_ky[i,mabs] * sign_m
-            cos_kxkykz_i = cos_kxky * cos_kz[i,nabs] - sin_kxky * sin_kz[i,nabs] * sign_n
-            sin_kxkykz_i = sin_kxky * cos_kz[i,nabs] + cos_kxky * sin_kz[i,nabs] * sign_n
-            for j in range(i,N):
+    if explflag:
+      print("  - with slab-like (EW2D) summation order") 
+      # TODO changing between slab-like or spherical summation order can be achieved
+      # by using a compute_kmode_index(num_pbc,...) function like in metalwalls which
+      # returns l,m,n for the different summation geometries and a single loop over all
+      # kpoints rather than using explicit loops.
+      for l in range(0,nx+1):
+        for m in range(-ny,ny+1) if l > 0 else range(1,ny+1):
+          for n in range(-nz,nz+1):
+            print('\r(%d/%d)' % (step,kpoints), end='', flush=True)
+           
+            # kx = l * twopi / Lx
+            kx = l*kprefac[0]
+            # ky = m * twopi / Ly
+            ky = m*kprefac[1]
+            # kz = N * twopi / Lz
+            kz = n*kprefac[2]
             
-              cos_kxky = cos_kx[j,l] * cos_ky[j,mabs] - sin_kx[j,l] * sin_ky[j,mabs] * sign_m
-              sin_kxky = sin_kx[j,l] * cos_ky[j,mabs] + cos_kx[j,l] * sin_ky[j,mabs] * sign_m
-              cos_kxkykz_j = cos_kxky * cos_kz[j,nabs] - sin_kxky * sin_kz[j,nabs] * sign_n
-              sin_kxkykz_j = sin_kxky * cos_kz[j,nabs] + cos_kxky * sin_kz[j,nabs] * sign_n
+            ksq = kx*kx + ky*ky + kz*kz
+            
+            if ksq <= ksqmax:
+            
+              mabs = abs(m)
+              sign_m = np.sign(m)
+              nabs = abs(n)
+              sign_n = np.sign(n)
               
-              pot_ij = Sk_alpha * (cos_kxkykz_i*cos_kxkykz_j + sin_kxkykz_i*sin_kxkykz_j)
+              Sk_alpha = preSk * np.exp(-0.25 * alphasqinv * ksq) / ksq
               
-              A[i,j] += pot_ij
-              if not symflag and (i != j): A[j,i] += pot_ij
-        step += 1                  
-  print('')
-  
+              for i in range(N):
+              
+                cos_kxky = cos_kx[i,l] * cos_ky[i,mabs] - sin_kx[i,l] * sin_ky[i,mabs] * sign_m
+                sin_kxky = sin_kx[i,l] * cos_ky[i,mabs] + cos_kx[i,l] * sin_ky[i,mabs] * sign_m
+                cos_kxkykz_i = cos_kxky * cos_kz[i,nabs] - sin_kxky * sin_kz[i,nabs] * sign_n
+                sin_kxkykz_i = sin_kxky * cos_kz[i,nabs] + cos_kxky * sin_kz[i,nabs] * sign_n
+                for j in range(i,N):
+                
+                  cos_kxky = cos_kx[j,l] * cos_ky[j,mabs] - sin_kx[j,l] * sin_ky[j,mabs] * sign_m
+                  sin_kxky = sin_kx[j,l] * cos_ky[j,mabs] + cos_kx[j,l] * sin_ky[j,mabs] * sign_m
+                  cos_kxkykz_j = cos_kxky * cos_kz[j,nabs] - sin_kxky * sin_kz[j,nabs] * sign_n
+                  sin_kxkykz_j = sin_kxky * cos_kz[j,nabs] + cos_kxky * sin_kz[j,nabs] * sign_n
+                  
+                  pot_ij = Sk_alpha * (cos_kxkykz_i*cos_kxkykz_j + sin_kxkykz_i*sin_kxkykz_j)
+                  
+                  A[i,j] += pot_ij
+                  if not symflag and (i != j): A[j,i] += pot_ij
+            step += 1                  
+      print('')
+    else:
+      print("  - with spherical (EW3D) summation order")
+      for l in range(0,nx+1):
+        for m in range(1,ny+1) if l == 0 else range(-ny,ny+1):
+          for n in range(1,ny+1) if (l == 0 and m == 0) else range(-nz,nz+1):
+            print('\r(%d/%d)' % (step,kpoints), end='', flush=True)
+           
+            # kx = l * twopi / Lx
+            kx = l*kprefac[0]
+            # ky = m * twopi / Ly
+            ky = m*kprefac[1]
+            # kz = N * twopi / Lz
+            kz = n*kprefac[2]
+            
+            ksq = kx*kx + ky*ky + kz*kz
+            
+            if ksq <= ksqmax:
+            
+              mabs = abs(m)
+              sign_m = np.sign(m)
+              nabs = abs(n)
+              sign_n = np.sign(n)
+              
+              Sk_alpha = preSk * np.exp(-0.25 * alphasqinv * ksq) / ksq
+              
+              for i in range(N):
+              
+                cos_kxky = cos_kx[i,l] * cos_ky[i,mabs] - sin_kx[i,l] * sin_ky[i,mabs] * sign_m
+                sin_kxky = sin_kx[i,l] * cos_ky[i,mabs] + cos_kx[i,l] * sin_ky[i,mabs] * sign_m
+                cos_kxkykz_i = cos_kxky * cos_kz[i,nabs] - sin_kxky * sin_kz[i,nabs] * sign_n
+                sin_kxkykz_i = sin_kxky * cos_kz[i,nabs] + cos_kxky * sin_kz[i,nabs] * sign_n
+                for j in range(i,N):
+                
+                  cos_kxky = cos_kx[j,l] * cos_ky[j,mabs] - sin_kx[j,l] * sin_ky[j,mabs] * sign_m
+                  sin_kxky = sin_kx[j,l] * cos_ky[j,mabs] + cos_kx[j,l] * sin_ky[j,mabs] * sign_m
+                  cos_kxkykz_j = cos_kxky * cos_kz[j,nabs] - sin_kxky * sin_kz[j,nabs] * sign_n
+                  sin_kxkykz_j = sin_kxky * cos_kz[j,nabs] + cos_kxky * sin_kz[j,nabs] * sign_n
+                  
+                  pot_ij = Sk_alpha * (cos_kxkykz_i*cos_kxkykz_j + sin_kxkykz_i*sin_kxkykz_j)
+                  
+                  A[i,j] += pot_ij
+                  if not symflag and (i != j): A[j,i] += pot_ij
+            step += 1                  
+      print('')
+    
+  else:
+    print("  - w/o precomputation")
+    # run without precomputed values to save memory
+    step = 1
+    
+    if explflag:
+      print("  - with slab-like (EW2D) summation order")
+      for l in range(0,nx+1):
+        for m in range(-ny,ny+1) if l > 0 else range(1,ny+1):
+          for n in range(-nz,nz+1):
+            print('\r(%d/%d)' % (step,kpoints), end='', flush=True)
+            
+            # kx = l * twopi / Lx
+            kx = l*kprefac[0]
+            # ky = m * twopi / Ly
+            ky = m*kprefac[1]
+            # kz = N * twopi / Lz
+            kz = n*kprefac[2]
+            
+            ksq = kx*kx + ky*ky + kz*kz
+            
+            if ksq <= ksqmax:
+              Sk_alpha = preSk * np.exp(-0.25 * alphasqinv * ksq) / ksq
+              for i in range(N):
+                cos_kxkykz_i = np.cos(np.dot([kx,ky,kz],r[i,:]))
+                sin_kxkykz_i = np.sin(np.dot([kx,ky,kz],r[i,:]))
+                for j in range(i,N):
+                  pot_ij = Sk_alpha * ( cos_kxkykz_i*np.cos(np.dot([kx,ky,kz],r[j,:])) \
+                                      + sin_kxkykz_i*np.sin(np.dot([kx,ky,kz],r[j,:])) )
+                  A[i,j] += pot_ij
+                  if not symflag and (i != j): A[j,i] += pot_ij
+            step += 1                  
+      print('')
+    else:
+      print("  - with spherical (EW3D) summation order")
+      sys.exit("ERROR: spherical summation order not (yet) implemented!")      
+     
   Ak = A-Aself-Areal-Aslab
   np.savetxt('A.lr',Ak)
       
@@ -249,18 +353,20 @@ def help():
   print('usage: python Aij.py')
   print('')
   print('  -h           print this message')
+  print('  -sf          set slab factor [default: %.1f]' % slabfac)
+  print('  -wf          set wire factor [default: %.1f]' % wirefac)
   print('')
-  print('  --explicit   turn on explicit slab/wire correction [default: %r]' % explflag)
-  print('  --symmetric  symmetric electrodes [default: %r]' % symflag)
-  print('  --slab       slab volume factor [default: %.1f]' % slabfac)
-  print('  --wire       wire volume factor [default: %.1f]' % wirefac)
+  print('  --exp        turn on explicit slab/wire correction [default: %r]' % explflag)
+  print('  --sym        symmetric electrodes [default: %r]' % symflag)
+  print('  --slab       toggle slab correction [default: %r]' % slabflag)
+  print('  --wire       toggle wire correction [default: %r]' % wireflag)
+  print('  --pre        toggle ewald precomputation [default: %r]' % preflag)
   print('  --help       print this message')
+  
   sys.exit()
 
 if __name__ == "__main__":
     main(sys.argv)
-
-
 
 
 

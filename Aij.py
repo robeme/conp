@@ -182,11 +182,10 @@ def main(argv):
   ######################################
   
   print("  calculating k-space contributions ... ")    
+  step = 1
   if preflag:
     print("  - with precomputation")
     # get reciprocal lattice for 2DPBC (see metalwalls doc)
-    step = 1
-    
     if explflag:
       print("  - with slab-like (EW2D) summation order") 
       # TODO changing between slab-like or spherical summation order can be achieved
@@ -282,9 +281,6 @@ def main(argv):
     
   else:
     print("  - w/o precomputation")
-    # run without precomputed values to save memory
-    step = 1
-    
     if explflag:
       print("  - with slab-like (EW2D) summation order")
       for l in range(0,nx+1):

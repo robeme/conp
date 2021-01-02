@@ -2,10 +2,11 @@
 
 import numpy as np
 import math, sys
+from scipy.special import gammaincc
 
 def main(argv):
 
-  global wirefac, slabfac, explflag, symflag, slabflag, wireflag, preflag
+  global wirefac, volfac, explflag, symflag, slabflag, wireflag, preflag
   global Rc, nx, ny, nz, nmax, alpha, eta
   global kpoints, ksqmax, kprefac, kxvecs, kyvecs, kzvecs
   global Lx,Ly,Lz,V,Vinv,Axyinv,N,r
@@ -17,8 +18,7 @@ def main(argv):
   wireflag = False
   preflag = True # should ewald terms be pre-computed for speed?
 
-  slabfac = 1.0
-  wirefac = 1.0
+  volfac = 1.0
   
   r = np.loadtxt('metalwalls/benzene.xyz', skiprows=2, usecols=(1,2,3), dtype=float) 
   Lx = 6.440189199460001E+01    
@@ -35,8 +35,7 @@ def main(argv):
   # process command line inputs
   for ninp,inp in enumerate(argv):
     if '-h' in inp: help()
-    if '-sf' in inp: slabfac = float(argv[ninp+1])
-    if '-wf' in inp: wirefac = float(argv[ninp+1])
+    if '-f' in inp: volfac = float(argv[ninp+1])
     if '--help' in inp: help()
     if '--exp' in inp: explflag = False
     if '--sym' in inp: symflag = True
@@ -46,9 +45,9 @@ def main(argv):
     
   # user error handling  
   if slabflag and wireflag: sys.exit("ERROR: can't use slab and wire correction at same time!")
-  if slabflag and not explflag and slabfac <= 1.0: sys.exit("ERROR: slab factor is too small (at lead > 3.0)!")
-  if wireflag and not explflag and wirefac <= 1.0: sys.exit("ERROR: wire factor is too small (at lead > 3.0)!")
-  if (slabfac > 1.0 or wirefac > 1.0) and explflag: sys.exit("ERROR: can't use explicit slab and wire correction with slab/wire factor > 1.0!")
+  if slabflag and not explflag and volfac <= 1.0: sys.exit("ERROR: slab factor is too small (at lead > 3.0)!")
+  if wireflag and not explflag and volfac <= 1.0: sys.exit("ERROR: wire factor is too small (at lead > 3.0)!")
+  if slabflag and explflag and volfac > 1.0: sys.exit("ERROR: can't use explicit slab correction (EW2D) with volfac > 1.0!")
   
   # k-space parameters
   Rc = 24.0
@@ -59,11 +58,18 @@ def main(argv):
   ny = 9 
   nz = 32
   
+  # INFO: we should also increase ny and/or nz if we use EW3DC  
+  #   CONP actually do and estimates nz from the modified z-dimension
+  #   we could also use the method in metalwalls to estimate alpha
+  #   eta and nx,ny,nz
   if wireflag: 
-    Ly *= wirefac
-    Lz *= wirefac
+    Lx *= volfac
+    Ly *= volfac
+    nx = int(nx*volfac)
+    ny = int(ny*volfac)
   if slabflag: 
-    Lz *= slabfac
+    Lz *= volfac
+    nz = int(nz*volfac)
 
   N = len(r)
   V = Lx*Ly*Lz
@@ -73,15 +79,13 @@ def main(argv):
   nmax = max([nx,ny,nz])
   kprefac = 2*np.pi*np.array([1./Lx,1./Ly,1./Lz])
   ksqmax = np.dot(kprefac*np.array([nx,ny,nz]),kprefac*np.array([nx,ny,nz]))
-  if not explflag: ksqmax *= 1.00001
-  if explflag: kpoints = (2*nz+1)*(2*nx*ny+nx+ny)
-  else: kpoints = 0  # else it is generated using compute kpoints
+  kpoints = (2*nz+1)*(2*nx*ny+nx+ny)
   
   selfcorr = (np.sqrt(2)*eta-2.*alpha)/np.sqrt(np.pi)
 
   Rcsq = Rc*Rc
 
-  MY_4pi = 4.*np.pi
+  MY_4PIVinv = 4.*np.pi*Vinv
   etasqr2inv = eta/np.sqrt(2)
   alphasq = alpha**2
   alphasqinv = 1.0 / alphasq
@@ -101,12 +105,8 @@ def main(argv):
   
   # precompute k-space coeffs
   print("  pre-computing k-space coeffs ...")
-  if not explflag: 
-    print("  - with reciprocal lattice vectors using method from LAMMPS")
-    compute_kpoints()
   if preflag: ewald_coeffs()
 
-    
   ######################################
   ###        self correction         ###
   ######################################
@@ -114,8 +114,6 @@ def main(argv):
   print("  calculating self corrections ...")
   for i in range(N):  
     A[i,i] += selfcorr
-  Aself = A*1.
-  np.savetxt('A.self',Aself)
   
   ######################################
   ###     real-space contribution    ###
@@ -130,8 +128,11 @@ def main(argv):
       dz = r[j,2] - r[i,2]
       
       # minimum image convention for slab/wire geometry
-      dx = dx - int(round(dx / Lx)) * Lx
-      if wireflag: dy = dy - int(round(dy / Ly)) * Ly
+      if slabflag:
+        dx = dx - int(round(dx / Lx)) * Lx
+        dy = dy - int(round(dy / Ly)) * Ly
+      if wireflag: 
+        dz = dz - int(round(dz / Lz)) * Lz
       
       dijsq = dx*dx+dy*dy+dz*dz
       
@@ -140,8 +141,6 @@ def main(argv):
         A[i,j] += ( math.erfc(alpha*dij) - math.erfc(etasqr2inv*dij) ) / dij 
         
   print('')
-  Areal = A-Aself
-  np.savetxt('A.sr',Areal)
   
   ######################################
   ###   slab (or wire) correction    ###
@@ -152,10 +151,26 @@ def main(argv):
   if wireflag:  
     if explflag:
       print("  - EW1D slab correction")
-      sys.exit("ERROR: explicit wire correction not (yet) implemented!")
+      # I'm not sure if I did here the correct thing. Maybe I need the EW1D method
+      # b/c in EWD1M it is looped over first for Gx,Gy and then over Gz\neq0 while in
+      # EWD1 it is looped over G\neq0 
+      # -> EWD1M is most probably not working here...
+      prefac = 1./(2.*Lz)
+      for i in range(N):
+        for j in range(i,N):
+          dx = r[j,0]-r[i,0]
+          dy = r[j,1]-r[i,1]
+          if (dx==0) and (dy==0): continue
+          
+          rhosq = dx*dx+dy*dy
+          alpharhosq = alphasq*rhosq
+          pot_ij = prefac*(np.euler_gamma+gammaincc(0,alpharhosq)+np.log(alpharhosq))
+          
+          A[i,j] -= pot_ij
+          if not symflag and (i != j): A[j,i] -= pot_ij 
+      
     else:
       print("  - EW3DC wire correction")
-      sys.exit("ERROR: implicit wire correction not (yet) implemented!")
       for i in range(N):
         yprefac = preWire*r[i,1]
         zprefac = preWire*r[i,2]
@@ -166,7 +181,7 @@ def main(argv):
 
   if slabflag:
     if explflag:
-      print("  - using EW2D slab correction")
+      print("  - using EW2D(?) slab correction")
       Axyinv = 1./(Lx*Ly)
       for i in range(N):
         for j in range(i,N):
@@ -179,138 +194,90 @@ def main(argv):
     else:
       print("  - using EW3DC slab correction")
       for i in range(N):
-        prefac = MY_4pi*r[i,2]
+        prefac = MY_4PIVinv*r[i,2]
         for j in range(i,N):
           pot_ij = prefac*r[j,2]
           A[i,j] += pot_ij
           if not symflag and (i != j): A[j,i] += pot_ij
-    
-  Aslab = A-Aself-Areal
-  np.savetxt('A.k0',Aslab)
     
   ######################################
   ###      k-space contribution      ###
   ######################################
   
   print("  calculating k-space contributions ... ")    
-  step = 1
   if preflag:
     print("  - with precomputation")
     # get reciprocal lattice for 2DPBC (see metalwalls doc)
-    if explflag:
-      print("  - with slab-like (EW2D) summation order") 
-      # TODO changing between slab-like or spherical summation order can be achieved
-      # by using a compute_kmode_index(num_pbc,...) function like in metalwalls which
-      # returns l,m,n for the different summation geometries and a single loop over all
-      # kpoints rather than using explicit loops.
-      for l in range(0,nx+1):
-        for m in range(-ny,ny+1) if l > 0 else range(1,ny+1):
-          for n in range(-nz,nz+1):
-            print('\r(%d/%d)' % (step,kpoints), end='', flush=True)
-           
-            # kx = l * twopi / Lx
-            kx = l*kprefac[0]
-            # ky = m * twopi / Ly
-            ky = m*kprefac[1]
-            # kz = N * twopi / Lz
-            kz = n*kprefac[2]
+    for k in range(1,kpoints+1):         
+      print('\r(%d/%d)' % (k,kpoints), end='', flush=True)
+      
+      # no matter if we use EW3DC, EW1D or EW2D, we need to loop over 2D pbc k-space
+      l, m, n = compute_kmode_index_2D(k)   
+
+      # kx = l * twopi / Lx
+      kx = l*kprefac[0]
+      # ky = m * twopi / Ly
+      ky = m*kprefac[1]
+      # kz = N * twopi / Lz
+      kz = n*kprefac[2]
+      
+      ksq = kx*kx + ky*ky + kz*kz
+      
+      if ksq <= ksqmax:
+      
+        mabs = abs(m)
+        sign_m = np.sign(m)
+        nabs = abs(n)
+        sign_n = np.sign(n)
+        
+        Sk_alpha = preSk * np.exp(-0.25 * alphasqinv * ksq) / ksq
+        
+        for i in range(N):
+        
+          cos_kxky = cos_kx[i,l] * cos_ky[i,mabs] - sin_kx[i,l] * sin_ky[i,mabs] * sign_m
+          sin_kxky = sin_kx[i,l] * cos_ky[i,mabs] + cos_kx[i,l] * sin_ky[i,mabs] * sign_m
+          cos_kxkykz_i = cos_kxky * cos_kz[i,nabs] - sin_kxky * sin_kz[i,nabs] * sign_n
+          sin_kxkykz_i = sin_kxky * cos_kz[i,nabs] + cos_kxky * sin_kz[i,nabs] * sign_n
+          for j in range(i,N):
+          
+            cos_kxky = cos_kx[j,l] * cos_ky[j,mabs] - sin_kx[j,l] * sin_ky[j,mabs] * sign_m
+            sin_kxky = sin_kx[j,l] * cos_ky[j,mabs] + cos_kx[j,l] * sin_ky[j,mabs] * sign_m
+            cos_kxkykz_j = cos_kxky * cos_kz[j,nabs] - sin_kxky * sin_kz[j,nabs] * sign_n
+            sin_kxkykz_j = sin_kxky * cos_kz[j,nabs] + cos_kxky * sin_kz[j,nabs] * sign_n
             
-            ksq = kx*kx + ky*ky + kz*kz
+            pot_ij = Sk_alpha * (cos_kxkykz_i*cos_kxkykz_j + sin_kxkykz_i*sin_kxkykz_j)
             
-            if ksq <= ksqmax:
-            
-              mabs = abs(m)
-              sign_m = np.sign(m)
-              nabs = abs(n)
-              sign_n = np.sign(n)
-              
-              Sk_alpha = preSk * np.exp(-0.25 * alphasqinv * ksq) / ksq
-              
-              for i in range(N):
-              
-                cos_kxky = cos_kx[i,l] * cos_ky[i,mabs] - sin_kx[i,l] * sin_ky[i,mabs] * sign_m
-                sin_kxky = sin_kx[i,l] * cos_ky[i,mabs] + cos_kx[i,l] * sin_ky[i,mabs] * sign_m
-                cos_kxkykz_i = cos_kxky * cos_kz[i,nabs] - sin_kxky * sin_kz[i,nabs] * sign_n
-                sin_kxkykz_i = sin_kxky * cos_kz[i,nabs] + cos_kxky * sin_kz[i,nabs] * sign_n
-                for j in range(i,N):
-                
-                  cos_kxky = cos_kx[j,l] * cos_ky[j,mabs] - sin_kx[j,l] * sin_ky[j,mabs] * sign_m
-                  sin_kxky = sin_kx[j,l] * cos_ky[j,mabs] + cos_kx[j,l] * sin_ky[j,mabs] * sign_m
-                  cos_kxkykz_j = cos_kxky * cos_kz[j,nabs] - sin_kxky * sin_kz[j,nabs] * sign_n
-                  sin_kxkykz_j = sin_kxky * cos_kz[j,nabs] + cos_kxky * sin_kz[j,nabs] * sign_n
-                  
-                  pot_ij = Sk_alpha * (cos_kxkykz_i*cos_kxkykz_j + sin_kxkykz_i*sin_kxkykz_j)
-                  
-                  A[i,j] += pot_ij
-                  if not symflag and (i != j): A[j,i] += pot_ij
-            step += 1                  
-      print('')
-    else:
-      print("  - with spherical (EW3D) summation order")
-      sys.exit("ERROR: spherical summation order not (yet) implemented!")     
+            A[i,j] += pot_ij
+            if not symflag and (i != j): A[j,i] += pot_ij                 
+    print('')
   else:
     print("  - w/o precomputation")
-    if explflag:
-      print("  - with slab-like (EW2D) summation order")
-      for l in range(0,nx+1):
-        for m in range(-ny,ny+1) if l > 0 else range(1,ny+1):
-          for n in range(-nz,nz+1):
-            print('\r(%d/%d)' % (step,kpoints), end='', flush=True)
-            
-            # kx = l * twopi / Lx
-            kx = l*kprefac[0]
-            # ky = m * twopi / Ly
-            ky = m*kprefac[1]
-            # kz = N * twopi / Lz
-            kz = n*kprefac[2]
-            
-            ksq = kx*kx + ky*ky + kz*kz
-            
-            if ksq <= ksqmax:
-              Sk_alpha = preSk * np.exp(-0.25 * alphasqinv * ksq) / ksq
-              for i in range(N):
-                cos_kxkykz_i = np.cos(np.dot([kx,ky,kz],r[i,:]))
-                sin_kxkykz_i = np.sin(np.dot([kx,ky,kz],r[i,:]))
-                for j in range(i,N):
-                  pot_ij = Sk_alpha * ( cos_kxkykz_i*np.cos(np.dot([kx,ky,kz],r[j,:])) \
-                                      + sin_kxkykz_i*np.sin(np.dot([kx,ky,kz],r[j,:])) )
-                  A[i,j] += pot_ij
-                  if not symflag and (i != j): A[j,i] += pot_ij
-            step += 1                  
-      print('')
-    else:
-      print("  - with spherical (EW3D) summation order")
-      for k in range(kpoints):
-        print('\r(%d/%d)' % (step,kpoints), end='', flush=True)
-       
-        l = kxvecs[k]
-        m = kyvecs[k]
-        n = kzvecs[k]
-       
-        # kx = l * twopi / Lx
-        kx = l*kprefac[0]
-        # ky = m * twopi / Ly
-        ky = m*kprefac[1]
-        # kz = N * twopi / Lz
-        kz = n*kprefac[2]
-        
-        ksq = kx*kx + ky*ky + kz*kz
-            
-        if ksq <= ksqmax:
-          Sk_alpha = preSk * np.exp(-0.25 * alphasqinv * ksq) / ksq
-          for i in range(N):
-            cos_kxkykz_i = np.cos(np.dot([kx,ky,kz],r[i,:]))
-            sin_kxkykz_i = np.sin(np.dot([kx,ky,kz],r[i,:]))
-            for j in range(i,N):
-              pot_ij = Sk_alpha * ( cos_kxkykz_i*np.cos(np.dot([kx,ky,kz],r[j,:])) \
-                                  + sin_kxkykz_i*np.sin(np.dot([kx,ky,kz],r[j,:])) )
-              A[i,j] += pot_ij
-              if not symflag and (i != j): A[j,i] += pot_ij
-        step += 1                   
-      print('') 
-     
-  Ak = A-Aself-Areal-Aslab
-  np.savetxt('A.lr',Ak)
+    for k in range(1,kpoints+1):
+      print('\r(%d/%d)' % (k+1,kpoints), end='', flush=True)
+      
+      # no matter if we use EW3DC, EW1D or EW2D, we need to loop over 2D pbc k-space    
+      l, m, n = compute_kmode_index_2D(k)
+      
+      # kx = l * twopi / Lx
+      kx = l*kprefac[0]
+      # ky = m * twopi / Ly
+      ky = m*kprefac[1]
+      # kz = N * twopi / Lz
+      kz = n*kprefac[2]
+      
+      ksq = kx*kx + ky*ky + kz*kz
+      
+      if ksq <= ksqmax:
+        Sk_alpha = preSk * np.exp(-0.25 * alphasqinv * ksq) / ksq
+        for i in range(N):
+          cos_kxkykz_i = np.cos(np.dot([kx,ky,kz],r[i,:]))
+          sin_kxkykz_i = np.sin(np.dot([kx,ky,kz],r[i,:]))
+          for j in range(i,N):
+            pot_ij = Sk_alpha * ( cos_kxkykz_i*np.cos(np.dot([kx,ky,kz],r[j,:])) \
+                                + sin_kxkykz_i*np.sin(np.dot([kx,ky,kz],r[j,:])) )
+            A[i,j] += pot_ij
+            if not symflag and (i != j): A[j,i] += pot_ij             
+    print('')
       
   if symflag: 
     # copy upper triangle to lower
@@ -319,6 +286,7 @@ def main(argv):
     A[il]=A[iu]
   
   np.savetxt('A.mat',A)  
+  np.set_printoptions(precision=3,suppress=True)
   print(A)
   
 def ewald_coeffs():
@@ -340,140 +308,231 @@ def ewald_coeffs():
     for i in range(N):
       cos_kz[i,k] = np.cos(k*kprefac[2]*r[i,2])
       sin_kz[i,k] = np.sin(k*kprefac[2]*r[i,2])
+
+def compute_kmode_index_2D(ik):
+  """
+  returns k vector for 2D PBC 
+  
+  rather than using individual loops, we compute the k-modes by running over kpoints
+  
+  the k-mode index is a (l,m,n) triplets
+  
+  assumes kmode start is (nx, ny, nz)
+  l ranges from 0 to nx
+  m ranges from -ny to +ny, except when l==0, it ranges from 1 to +ny
+  n ranges from -nz to +nz
+  """
+  
+  if (ik <= ny*(2*nz+1)):
+    n = np.mod((ik - 1), (2*nz+1)) - nz
+    m = np.floor_divide(ik - 1,2*nz+1) + 1
+    l = 0
+  else:
+    n = np.mod((ik - 1), (2*nz+1)) - nz
+    ik_mn = (ik - ny*(2*nz+1) - (n + nz) - 1) / (2*nz + 1)
+    m = np.mod(ik_mn, (2*ny+1)) - ny
+    l = np.floor_divide(ik_mn, 2*ny+1) + 1 
+  return np.array([l,m,n],dtype=int)
+  
+def compute_kmode_index_3D(ik):
+  """
+  returns k vector for 3D PBC
+  
+  the k-mode index is a (l,m,n) triplets
+  
+  Assumes kmode start is (kmax_x, kmax_y, kmax_z)
+  l ranges from 0 to nx
+  m ranges from -ny to +ny, except when l==0, it ranges from 1 to +ny
+  n ranges from -nz to +nz, except when l==0 and m==0, it ranges from 1 to +nz
+ 
+  ik is the global mode index: ik=1 => k=0, l=0, n=1
+  """
+  if (ik <= nz):
+     n = ik
+     m = 0
+     l = 0
+  elif (ik <= nz + ny*(2*nz+1)):
+     n = np.mod((ik - nz - 1), (2*nz+1)) - nz
+     m = np.floor_divide(ik - nz - 1,2*nz+1) + 1 # integer division
+     l = 0
+  else:
+     n = np.mod((ik - nz - 1), (2*nz+1)) - nz
+     ik_mn = np.floor_divide(ik - nz - ny*(2*nz+1) - (n + nz) - 1,2*nz + 1) # integer division
+     m = np.mod(ik_mn, (2*ny+1)) - ny
+     l = np.floor_divide(ik_mn,2*ny+1) + 1 # integer division
+  return np.array([l,m,n],dtype=int)
       
 def help():
   print('usage: python Aij.py')
   print('')
   print('  -h           print this message')
-  print('  -sf          set slab factor [default: %.1f]' % slabfac)
-  print('  -wf          set wire factor [default: %.1f]' % wirefac)
+  print('  -f           set volume factor [default: %.1f]' % volfac)
   print('')
   print('  --exp        turn on explicit slab/wire correction [default: %r]' % explflag)
   print('  --sym        symmetric electrodes [default: %r]' % symflag)
-  print('  --slab       toggle slab correction [default: %r]' % slabflag)
-  print('  --wire       toggle wire correction [default: %r]' % wireflag)
+  print('  --slab       toggle slab correction (z is non-periodic) [default: %r]' % slabflag)
+  print('  --wire       toggle wire correction (x,y are non-periodic) [default: %r]' % wireflag)
   print('  --pre        toggle ewald precomputation [default: %r]' % preflag)
   print('  --help       print this message')
   
   sys.exit()
 
-def compute_kpoints():
-  "kpoints for k-space part"
-  global kpoints, kxvecs, kyvecs, kzvecs
-  
-  kxvecs = []
-  kyvecs = []
-  kzvecs = []
+# snippet for explicit loop over k-space
+#    for l in range(0,nx+1):
+#      for m in range(-ny,ny+1) if l > 0 else range(1,ny+1):
+#        for n in range(1,nz+1) if not explflag and (l==0) and (m==0) else range(-nz,nz+1):
+#          print('\r(%d/%d)' % (step,kpoints), end='', flush=True)
+# end snippet 
 
-  # (k,0,0), (0,l,0), (0,0,m)
+# snippet for looping over compute_kpoints() in k-space
+#      print("  - with spherical (EW3D) summation order")
+#      for k in range(kpoints):
+#        print('\r(%d/%d)' % (step,kpoints), end='', flush=True)
+#       
+#        l = kxvecs[k]
+#        m = kyvecs[k]
+#        n = kzvecs[k]
+#       
+#        # kx = l * twopi / Lx
+#        kx = l*kprefac[0]
+#        # ky = m * twopi / Ly
+#        ky = m*kprefac[1]
+#        # kz = N * twopi / Lz
+#        kz = n*kprefac[2]
+#        
+#        ksq = kx*kx + ky*ky + kz*kz
+#            
+#        if ksq <= ksqmax:
+#          Sk_alpha = preSk * np.exp(-0.25 * alphasqinv * ksq) / ksq
+#          for i in range(N):
+#            cos_kxkykz_i = np.cos(np.dot([kx,ky,kz],r[i,:]))
+#            sin_kxkykz_i = np.sin(np.dot([kx,ky,kz],r[i,:]))
+#            for j in range(i,N):
+#              pot_ij = Sk_alpha * ( cos_kxkykz_i*np.cos(np.dot([kx,ky,kz],r[j,:])) \
+#                                  + sin_kxkykz_i*np.sin(np.dot([kx,ky,kz],r[j,:])) )
+#              A[i,j] += pot_ij
+#              if not symflag and (i != j): A[j,i] += pot_ij
+#        step += 1                   
+#      print('') 
+# end snippet
 
-  for m in range(1,nmax+1):
-    sqk = (m*kprefac[0]) * (m*kprefac[0]);
-    if sqk <= ksqmax:
-      kxvecs.append(m)
-      kyvecs.append(0)
-      kzvecs.append(0)
-      #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-      kpoints += 1
-    sqk = (m*kprefac[1]) * (m*kprefac[1]);
-    if sqk <= ksqmax:
-      kxvecs.append(0)
-      kyvecs.append(m)
-      kzvecs.append(0)
-      #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-      kpoints += 1
-    sqk = (m*kprefac[2]) * (m*kprefac[2]);
-    if sqk <= ksqmax:
-      kxvecs.append(0)
-      kyvecs.append(0)
-      kzvecs.append(m)
-      #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-      kpoints += 1
+#def compute_kpoints():
+#  "kpoints for k-space part"
+#  global kpoints, kxvecs, kyvecs, kzvecs
+#  
+#  kxvecs = []
+#  kyvecs = []
+#  kzvecs = []
 
-  # 1 = (k,l,0), 2 = (k,-l,0)
+#  # (k,0,0), (0,l,0), (0,0,m)
 
-  for k in range(1,nx+1):
-    for l in range(1,ny+1):
-      sqk = (kprefac[0]*k) * (kprefac[0]*k) + (kprefac[1]*l) * (kprefac[1]*l);
-      if sqk <= ksqmax:
-        kxvecs.append(k)
-        kyvecs.append(l)
-        kzvecs.append(0)
-        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-        kpoints += 1
-        
-        kxvecs.append(k)
-        kyvecs.append(-l)
-        kzvecs.append(0)
-        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-        kpoints += 1
+#  for m in range(1,nmax+1):
+#    sqk = (m*kprefac[0]) * (m*kprefac[0]);
+#    if sqk <= ksqmax:
+#      kxvecs.append(m)
+#      kyvecs.append(0)
+#      kzvecs.append(0)
+#      #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+#      kpoints += 1
+#    sqk = (m*kprefac[1]) * (m*kprefac[1]);
+#    if sqk <= ksqmax:
+#      kxvecs.append(0)
+#      kyvecs.append(m)
+#      kzvecs.append(0)
+#      #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+#      kpoints += 1
+#    sqk = (m*kprefac[2]) * (m*kprefac[2]);
+#    if sqk <= ksqmax:
+#      kxvecs.append(0)
+#      kyvecs.append(0)
+#      kzvecs.append(m)
+#      #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+#      kpoints += 1
 
-  # 1 = (0,l,m), 2 = (0,l,-m)
+#  # 1 = (k,l,0), 2 = (k,-l,0)
 
-  for l in range(1,ny+1):
-    for m in range(1,nz+1):
-      sqk = (kprefac[1]*l) * (kprefac[1]*l) + (kprefac[2]*m) * (kprefac[2]*m)
-      if sqk <= ksqmax:
-        kxvecs.append(0)
-        kyvecs.append(l)
-        kzvecs.append(m)
-        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-        kpoints += 1
+#  for k in range(1,nx+1):
+#    for l in range(1,ny+1):
+#      sqk = (kprefac[0]*k) * (kprefac[0]*k) + (kprefac[1]*l) * (kprefac[1]*l);
+#      if sqk <= ksqmax:
+#        kxvecs.append(k)
+#        kyvecs.append(l)
+#        kzvecs.append(0)
+#        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+#        kpoints += 1
+#        
+#        kxvecs.append(k)
+#        kyvecs.append(-l)
+#        kzvecs.append(0)
+#        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+#        kpoints += 1
 
-        kxvecs.append(0)
-        kyvecs.append(l)
-        kzvecs.append(-m)
-        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-        kpoints += 1
+#  # 1 = (0,l,m), 2 = (0,l,-m)
 
-  # 1 = (k,0,m), 2 = (k,0,-m)
+#  for l in range(1,ny+1):
+#    for m in range(1,nz+1):
+#      sqk = (kprefac[1]*l) * (kprefac[1]*l) + (kprefac[2]*m) * (kprefac[2]*m)
+#      if sqk <= ksqmax:
+#        kxvecs.append(0)
+#        kyvecs.append(l)
+#        kzvecs.append(m)
+#        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+#        kpoints += 1
 
-  for k in range(1,nx+1):
-    for m in range(1,nz+1):
-      sqk = (kprefac[0]*k) * (kprefac[0]*k) + (kprefac[2]*m) * (kprefac[2]*m)
-      if sqk <= ksqmax:
-        kxvecs.append(k)
-        kyvecs.append(0)
-        kzvecs.append(m)
-        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-        kpoints += 1
+#        kxvecs.append(0)
+#        kyvecs.append(l)
+#        kzvecs.append(-m)
+#        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+#        kpoints += 1
 
-        kxvecs.append(k)
-        kyvecs.append(0)
-        kzvecs.append(-m)
-        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-        kpoints += 1
+#  # 1 = (k,0,m), 2 = (k,0,-m)
 
-  # 1 = (k,l,m), 2 = (k,-l,m), 3 = (k,l,-m), 4 = (k,-l,-m)
+#  for k in range(1,nx+1):
+#    for m in range(1,nz+1):
+#      sqk = (kprefac[0]*k) * (kprefac[0]*k) + (kprefac[2]*m) * (kprefac[2]*m)
+#      if sqk <= ksqmax:
+#        kxvecs.append(k)
+#        kyvecs.append(0)
+#        kzvecs.append(m)
+#        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+#        kpoints += 1
 
-  for k in range(1,nx+1):
-    for l in range(1,ny+1):
-      for m in range(1,nz+1):
-        sqk = (kprefac[0]*k) * (kprefac[0]*k) + (kprefac[1]*l) * (kprefac[1]*l) + (kprefac[2]*m) * (kprefac[2]*m);
-        if sqk <= ksqmax:
-          kxvecs.append(k)
-          kyvecs.append(l)
-          kzvecs.append(m)
-          #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-          kpoints += 1
+#        kxvecs.append(k)
+#        kyvecs.append(0)
+#        kzvecs.append(-m)
+#        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+#        kpoints += 1
 
-          kxvecs.append(k)
-          kyvecs.append(-l)
-          kzvecs.append(m)
-          #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-          kpoints += 1
+#  # 1 = (k,l,m), 2 = (k,-l,m), 3 = (k,l,-m), 4 = (k,-l,-m)
 
-          kxvecs.append(k)
-          kyvecs.append(l)
-          kzvecs.append(-m)
-          #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-          kpoints += 1
+#  for k in range(1,nx+1):
+#    for l in range(1,ny+1):
+#      for m in range(1,nz+1):
+#        sqk = (kprefac[0]*k) * (kprefac[0]*k) + (kprefac[1]*l) * (kprefac[1]*l) + (kprefac[2]*m) * (kprefac[2]*m);
+#        if sqk <= ksqmax:
+#          kxvecs.append(k)
+#          kyvecs.append(l)
+#          kzvecs.append(m)
+#          #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+#          kpoints += 1
 
-          kxvecs.append(k)
-          kyvecs.append(-l)
-          kzvecs.append(-m)
-          #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-          kpoints += 1
+#          kxvecs.append(k)
+#          kyvecs.append(-l)
+#          kzvecs.append(m)
+#          #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+#          kpoints += 1
+
+#          kxvecs.append(k)
+#          kyvecs.append(l)
+#          kzvecs.append(-m)
+#          #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+#          kpoints += 1
+
+#          kxvecs.append(k)
+#          kyvecs.append(-l)
+#          kzvecs.append(-m)
+#          #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+#          kpoints += 1
 
 if __name__ == "__main__":
     main(sys.argv)
@@ -523,28 +582,7 @@ if __name__ == "__main__":
 #    for m in range(1,ny+1) if l == 0 else range(ny,ny+1):
 #      for n in range(1,nz+1) if (l == 0) and (m == 0) else range(nz,nz+1):
 
-#def compute_kmode_index(ik):
-#  """
-#  compute k-mode index
-#  
-#  the k-mode index is a (l,m,n) triplets
-#  
-#  assumes kmode start is (kmax_x, kmax_y, kmax_z)
-#  l ranges from 0 to kmax_x
-#  m ranges from -kmax_y to +kmax_y, except when l==0, it ranges from 1 to +kmax_y
-#  n ranges from -kmax_z to +kmax_z
-#  """
-#  
-#  if (ik <= ny*(2*nz+1)):
-#    n = np.mod((ik - 1), (2*nz+1)) - nz
-#    m = np.floor_divide(ik - 1,2*nz+1) + 1
-#    l = 0
-#  else:
-#    n = np.mod((ik - 1), (2*nz+1)) - nz
-#    ik_mn = (ik - ny*(2*nz+1) - (n + nz) - 1) / (2*nz + 1)
-#    m = np.mod(ik_mn, (2*ny+1)) - ny
-#    l = np.floor_divide(ik_mn, 2*ny+1) + 1 
-#  return np.array([l,m,n])
+
 
 #      --------------------------------------------------------------      
 #      
@@ -623,7 +661,7 @@ if __name__ == "__main__":
 #      ! Choose rkmax such that truncature error < ktol
 #      !
 #      ! since
-#      ! error < 8 \sum_{kmax_x}^{\infty} \sum_{kmax_y}^{\infty} \int_{kmax_z}^{infty} \frac{e^{-(|k|^2| + u^2)/(4\alpha^2)}}{|k|^2 + u^2} du
+#      ! error < 8 \sum_{nx}^{\infty} \sum_{ny}^{\infty} \int_{nz}^{infty} \frac{e^{-(|k|^2| + u^2)/(4\alpha^2)}}{|k|^2 + u^2} du
 #      ! error < 8 * 4 * \pi \int_{rkmax}^{\infty} e^{-r^2/(4\alpha^2)} dr
 #      ! error < 32 * \pi * \frac{\sqrt{\pi}}{2} * 2 * \alpha \erfc{rkmax/(2\alpha)}
 #      !
@@ -633,21 +671,21 @@ if __name__ == "__main__":
 #      rkmax = sqrt(-log(this%ktol)*4.0_wp*this%alpha*this%alpha)
 #      !
 
-#      this%kmax_x = floor(rkmax*box%length(1)/(twopi))
-#      this%kmax_y = floor(rkmax*box%length(2)/(twopi))
+#      this%nx = floor(rkmax*box%length(1)/(twopi))
+#      this%ny = floor(rkmax*box%length(2)/(twopi))
 #      this%knorm2_max = rkmax*rkmax
 
 #      select case (num_pbc)
 #      case(2)
 #         rkmin = this%zscale_weight * twopi / box%length(3)
 #         rkmax = this%zscale_range * sqrt(-log(this%ktol))*2.0_wp*this%alpha / rkmin
-#         kmax_z = floor(rkmax)
+#         nz = floor(rkmax)
 #      case(3)
-#         kmax_z = floor(rkmax*box%length(3)/(twopi))
+#         nz = floor(rkmax*box%length(3)/(twopi))
 #      case default
-#         kmax_z = 0
+#         nz = 0
 #      end select
-#      this%kmax_z = kmax_z
+#      this%nz = nz
 
 
 

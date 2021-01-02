@@ -6,7 +6,8 @@ import math, sys
 def main(argv):
 
   global wirefac, slabfac, explflag, symflag, slabflag, wireflag, preflag
-  global Rc, nx, ny, nz, nmax, ksqmax, kpoints, kprefac, alpha, eta
+  global Rc, nx, ny, nz, nmax, alpha, eta
+  global kpoints, ksqmax, kprefac, kxvecs, kyvecs, kzvecs
   global Lx,Ly,Lz,V,Vinv,Axyinv,N,r
   global A,cos_kx, sin_kx, cos_ky, sin_ky, cos_kz, sin_kz
   
@@ -19,15 +20,17 @@ def main(argv):
   slabfac = 1.0
   wirefac = 1.0
   
-  r = np.loadtxt('metalwalls/plates.xyz', skiprows=2, usecols=(1,2,3), dtype=float) 
+  r = np.loadtxt('metalwalls/benzene.xyz', skiprows=2, usecols=(1,2,3), dtype=float) 
   Lx = 6.440189199460001E+01    
   Ly = 6.971769370200001E+01
   Lz = 2.510765832095E+02
   
   # wrap coordinates into box with origin at lower left
-  for i,x in enumerate(r[:,0]): r[i,0] = x - np.floor(x / Lx) * Lx
-  for i,y in enumerate(r[:,1]): r[i,1] = y - np.floor(y / Ly) * Ly
-  for i,z in enumerate(r[:,2]): r[i,2] = z - np.floor(z / Lz) * Lz
+  # (for a comparison with metalwalls positions should not be wrapped ...!)
+  # this is strange since corrections for atoms in different images give weird results
+  #for i,x in enumerate(r[:,0]): r[i,0] = x - np.floor(x / Lx) * Lx
+  #for i,y in enumerate(r[:,1]): r[i,1] = y - np.floor(y / Ly) * Ly
+  #for i,z in enumerate(r[:,2]): r[i,2] = z - np.floor(z / Lz) * Lz
   
   # process command line inputs
   for ninp,inp in enumerate(argv):
@@ -70,19 +73,22 @@ def main(argv):
   nmax = max([nx,ny,nz])
   kprefac = 2*np.pi*np.array([1./Lx,1./Ly,1./Lz])
   ksqmax = np.dot(kprefac*np.array([nx,ny,nz]),kprefac*np.array([nx,ny,nz]))
-  kpoints = (2*nz+1)*(2*nx*ny+nx+ny)
+  if not explflag: ksqmax *= 1.00001
+  if explflag: kpoints = (2*nz+1)*(2*nx*ny+nx+ny)
+  else: kpoints = 0  # else it is generated using compute kpoints
   
   selfcorr = (np.sqrt(2)*eta-2.*alpha)/np.sqrt(np.pi)
 
   Rcsq = Rc*Rc
 
+  MY_4pi = 4.*np.pi
   etasqr2inv = eta/np.sqrt(2)
   alphasq = alpha**2
   alphasqinv = 1.0 / alphasq
   sqrpialpha = np.sqrt(np.pi)/alpha
   preSk = 8.*np.pi*Vinv
-  preM = 4./3.*np.pi
   preWire = 2.*np.pi*Vinv
+ 
   
   # allocate matrices 
   A = np.zeros([N,N]) 
@@ -95,7 +101,11 @@ def main(argv):
   
   # precompute k-space coeffs
   print("  pre-computing k-space coeffs ...")
+  if not explflag: 
+    print("  - with reciprocal lattice vectors using method from LAMMPS")
+    compute_kpoints()
   if preflag: ewald_coeffs()
+
     
   ######################################
   ###        self correction         ###
@@ -160,7 +170,8 @@ def main(argv):
       Axyinv = 1./(Lx*Ly)
       for i in range(N):
         for j in range(i,N):
-           zij = r[j,2] - r[i,2] # here might be a small glitch... should be abs(...) according to metalwalls ewald doc
+           zij = r[j,2] - r[i,2] 
+           # multiplication of zij with erf(zij) is symmetric, thus no need for abs(...)
            zijsq = zij*zij
            pot_ij = 2.0*Axyinv * (sqrpialpha*np.exp(-zijsq*alphasq) + np.pi*zij*math.erf(zij*alpha))
            A[i,j] -= pot_ij
@@ -168,9 +179,9 @@ def main(argv):
     else:
       print("  - using EW3DC slab correction")
       for i in range(N):
-        prefac = 4.*np.pi*r[i,2]
+        prefac = MY_4pi*r[i,2]
         for j in range(i,N):
-          pot_ij = prefac*r[j,2] - preM*np.dot(r[i,:],r[j,:])
+          pot_ij = prefac*r[j,2]
           A[i,j] += pot_ij
           if not symflag and (i != j): A[j,i] += pot_ij
     
@@ -236,49 +247,7 @@ def main(argv):
       print('')
     else:
       print("  - with spherical (EW3D) summation order")
-      for l in range(0,nx+1):
-        for m in range(1,ny+1) if l == 0 else range(-ny,ny+1):
-          for n in range(1,ny+1) if (l == 0 and m == 0) else range(-nz,nz+1):
-            print('\r(%d/%d)' % (step,kpoints), end='', flush=True)
-           
-            # kx = l * twopi / Lx
-            kx = l*kprefac[0]
-            # ky = m * twopi / Ly
-            ky = m*kprefac[1]
-            # kz = N * twopi / Lz
-            kz = n*kprefac[2]
-            
-            ksq = kx*kx + ky*ky + kz*kz
-            
-            if ksq <= ksqmax:
-            
-              mabs = abs(m)
-              sign_m = np.sign(m)
-              nabs = abs(n)
-              sign_n = np.sign(n)
-              
-              Sk_alpha = preSk * np.exp(-0.25 * alphasqinv * ksq) / ksq
-              
-              for i in range(N):
-              
-                cos_kxky = cos_kx[i,l] * cos_ky[i,mabs] - sin_kx[i,l] * sin_ky[i,mabs] * sign_m
-                sin_kxky = sin_kx[i,l] * cos_ky[i,mabs] + cos_kx[i,l] * sin_ky[i,mabs] * sign_m
-                cos_kxkykz_i = cos_kxky * cos_kz[i,nabs] - sin_kxky * sin_kz[i,nabs] * sign_n
-                sin_kxkykz_i = sin_kxky * cos_kz[i,nabs] + cos_kxky * sin_kz[i,nabs] * sign_n
-                for j in range(i,N):
-                
-                  cos_kxky = cos_kx[j,l] * cos_ky[j,mabs] - sin_kx[j,l] * sin_ky[j,mabs] * sign_m
-                  sin_kxky = sin_kx[j,l] * cos_ky[j,mabs] + cos_kx[j,l] * sin_ky[j,mabs] * sign_m
-                  cos_kxkykz_j = cos_kxky * cos_kz[j,nabs] - sin_kxky * sin_kz[j,nabs] * sign_n
-                  sin_kxkykz_j = sin_kxky * cos_kz[j,nabs] + cos_kxky * sin_kz[j,nabs] * sign_n
-                  
-                  pot_ij = Sk_alpha * (cos_kxkykz_i*cos_kxkykz_j + sin_kxkykz_i*sin_kxkykz_j)
-                  
-                  A[i,j] += pot_ij
-                  if not symflag and (i != j): A[j,i] += pot_ij
-            step += 1                  
-      print('')
-    
+      sys.exit("ERROR: spherical summation order not (yet) implemented!")     
   else:
     print("  - w/o precomputation")
     if explflag:
@@ -311,7 +280,34 @@ def main(argv):
       print('')
     else:
       print("  - with spherical (EW3D) summation order")
-      sys.exit("ERROR: spherical summation order not (yet) implemented!")      
+      for k in range(kpoints):
+        print('\r(%d/%d)' % (step,kpoints), end='', flush=True)
+       
+        l = kxvecs[k]
+        m = kyvecs[k]
+        n = kzvecs[k]
+       
+        # kx = l * twopi / Lx
+        kx = l*kprefac[0]
+        # ky = m * twopi / Ly
+        ky = m*kprefac[1]
+        # kz = N * twopi / Lz
+        kz = n*kprefac[2]
+        
+        ksq = kx*kx + ky*ky + kz*kz
+            
+        if ksq <= ksqmax:
+          Sk_alpha = preSk * np.exp(-0.25 * alphasqinv * ksq) / ksq
+          for i in range(N):
+            cos_kxkykz_i = np.cos(np.dot([kx,ky,kz],r[i,:]))
+            sin_kxkykz_i = np.sin(np.dot([kx,ky,kz],r[i,:]))
+            for j in range(i,N):
+              pot_ij = Sk_alpha * ( cos_kxkykz_i*np.cos(np.dot([kx,ky,kz],r[j,:])) \
+                                  + sin_kxkykz_i*np.sin(np.dot([kx,ky,kz],r[j,:])) )
+              A[i,j] += pot_ij
+              if not symflag and (i != j): A[j,i] += pot_ij
+        step += 1                   
+      print('') 
      
   Ak = A-Aself-Areal-Aslab
   np.savetxt('A.lr',Ak)
@@ -360,6 +356,124 @@ def help():
   print('  --help       print this message')
   
   sys.exit()
+
+def compute_kpoints():
+  "kpoints for k-space part"
+  global kpoints, kxvecs, kyvecs, kzvecs
+  
+  kxvecs = []
+  kyvecs = []
+  kzvecs = []
+
+  # (k,0,0), (0,l,0), (0,0,m)
+
+  for m in range(1,nmax+1):
+    sqk = (m*kprefac[0]) * (m*kprefac[0]);
+    if sqk <= ksqmax:
+      kxvecs.append(m)
+      kyvecs.append(0)
+      kzvecs.append(0)
+      #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+      kpoints += 1
+    sqk = (m*kprefac[1]) * (m*kprefac[1]);
+    if sqk <= ksqmax:
+      kxvecs.append(0)
+      kyvecs.append(m)
+      kzvecs.append(0)
+      #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+      kpoints += 1
+    sqk = (m*kprefac[2]) * (m*kprefac[2]);
+    if sqk <= ksqmax:
+      kxvecs.append(0)
+      kyvecs.append(0)
+      kzvecs.append(m)
+      #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+      kpoints += 1
+
+  # 1 = (k,l,0), 2 = (k,-l,0)
+
+  for k in range(1,nx+1):
+    for l in range(1,ny+1):
+      sqk = (kprefac[0]*k) * (kprefac[0]*k) + (kprefac[1]*l) * (kprefac[1]*l);
+      if sqk <= ksqmax:
+        kxvecs.append(k)
+        kyvecs.append(l)
+        kzvecs.append(0)
+        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+        kpoints += 1
+        
+        kxvecs.append(k)
+        kyvecs.append(-l)
+        kzvecs.append(0)
+        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+        kpoints += 1
+
+  # 1 = (0,l,m), 2 = (0,l,-m)
+
+  for l in range(1,ny+1):
+    for m in range(1,nz+1):
+      sqk = (kprefac[1]*l) * (kprefac[1]*l) + (kprefac[2]*m) * (kprefac[2]*m)
+      if sqk <= ksqmax:
+        kxvecs.append(0)
+        kyvecs.append(l)
+        kzvecs.append(m)
+        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+        kpoints += 1
+
+        kxvecs.append(0)
+        kyvecs.append(l)
+        kzvecs.append(-m)
+        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+        kpoints += 1
+
+  # 1 = (k,0,m), 2 = (k,0,-m)
+
+  for k in range(1,nx+1):
+    for m in range(1,nz+1):
+      sqk = (kprefac[0]*k) * (kprefac[0]*k) + (kprefac[2]*m) * (kprefac[2]*m)
+      if sqk <= ksqmax:
+        kxvecs.append(k)
+        kyvecs.append(0)
+        kzvecs.append(m)
+        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+        kpoints += 1
+
+        kxvecs.append(k)
+        kyvecs.append(0)
+        kzvecs.append(-m)
+        #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+        kpoints += 1
+
+  # 1 = (k,l,m), 2 = (k,-l,m), 3 = (k,l,-m), 4 = (k,-l,-m)
+
+  for k in range(1,nx+1):
+    for l in range(1,ny+1):
+      for m in range(1,nz+1):
+        sqk = (kprefac[0]*k) * (kprefac[0]*k) + (kprefac[1]*l) * (kprefac[1]*l) + (kprefac[2]*m) * (kprefac[2]*m);
+        if sqk <= ksqmax:
+          kxvecs.append(k)
+          kyvecs.append(l)
+          kzvecs.append(m)
+          #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+          kpoints += 1
+
+          kxvecs.append(k)
+          kyvecs.append(-l)
+          kzvecs.append(m)
+          #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+          kpoints += 1
+
+          kxvecs.append(k)
+          kyvecs.append(l)
+          kzvecs.append(-m)
+          #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+          kpoints += 1
+
+          kxvecs.append(k)
+          kyvecs.append(-l)
+          kzvecs.append(-m)
+          #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
+          kpoints += 1
 
 if __name__ == "__main__":
     main(sys.argv)
@@ -549,127 +663,127 @@ if __name__ == "__main__":
 #def ewald_coeffs():
 #  "ewald coeffs for k-space part"
 #  
-#  global unitk
-#  global kcount
+#  global kprefac
+#  global kpoints
 #  
-#  unitk = 2.0*np.pi*np.array([1./Lx,1./Ly,1./Lz])
-#  kcount = 0
+#  kprefac = 2.0*np.pi*np.array([1./Lx,1./Ly,1./Lz])
+#  kpoints = 0
 
-#  gsqxmx = unitk[0]**2*nx**2
-#  gsqymx = unitk[1]**2*ny**2
-#  gsqzmx = unitk[2]**2*nz**2
+#  gsqxmx = kprefac[0]**2*nx**2
+#  gsqymx = kprefac[1]**2*ny**2
+#  gsqzmx = kprefac[2]**2*nz**2
 #  gsqmx = max([gsqxmx,gsqymx,gsqzmx])
 #  gsqmx *= 1.00001
 
 #  # (k,0,0), (0,l,0), (0,0,m)
 
 #  for m in range(1,nmax+1):
-#    sqk = (m*unitk[0]) * (m*unitk[0]);
+#    sqk = (m*kprefac[0]) * (m*kprefac[0]);
 #    if sqk <= gsqmx:
 #      kxvecs.append(m)
 #      kyvecs.append(0)
 #      kzvecs.append(0)
 #      ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-#      kcount += 1
-#    sqk = (m*unitk[1]) * (m*unitk[1]);
+#      kpoints += 1
+#    sqk = (m*kprefac[1]) * (m*kprefac[1]);
 #    if sqk <= gsqmx:
 #      kxvecs.append(0)
 #      kyvecs.append(m)
 #      kzvecs.append(0)
 #      ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-#      kcount += 1
-#    sqk = (m*unitk[2]) * (m*unitk[2]);
+#      kpoints += 1
+#    sqk = (m*kprefac[2]) * (m*kprefac[2]);
 #    if sqk <= gsqmx:
 #      kxvecs.append(0)
 #      kyvecs.append(0)
 #      kzvecs.append(m)
 #      ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-#      kcount += 1
+#      kpoints += 1
 
 #  # 1 = (k,l,0), 2 = (k,-l,0)
 
 #  for k in range(1,nx+1):
 #    for l in range(1,ny+1):
-#      sqk = (unitk[0]*k) * (unitk[0]*k) + (unitk[1]*l) * (unitk[1]*l);
+#      sqk = (kprefac[0]*k) * (kprefac[0]*k) + (kprefac[1]*l) * (kprefac[1]*l);
 #      if sqk <= gsqmx:
 #        kxvecs.append(k)
 #        kyvecs.append(l)
 #        kzvecs.append(0)
 #        ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-#        kcount += 1
+#        kpoints += 1
 #        
 #        kxvecs.append(k)
 #        kyvecs.append(-l)
 #        kzvecs.append(0)
 #        ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-#        kcount += 1
+#        kpoints += 1
 
 #  # 1 = (0,l,m), 2 = (0,l,-m)
 
 #  for l in range(1,ny+1):
 #    for m in range(1,nz+1):
-#      sqk = (unitk[1]*l) * (unitk[1]*l) + (unitk[2]*m) * (unitk[2]*m)
+#      sqk = (kprefac[1]*l) * (kprefac[1]*l) + (kprefac[2]*m) * (kprefac[2]*m)
 #      if sqk <= gsqmx:
 #        kxvecs.append(0)
 #        kyvecs.append(l)
 #        kzvecs.append(m)
 #        ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-#        kcount += 1
+#        kpoints += 1
 
 #        kxvecs.append(0)
 #        kyvecs.append(l)
 #        kzvecs.append(-m)
 #        ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-#        kcount += 1
+#        kpoints += 1
 
 #  # 1 = (k,0,m), 2 = (k,0,-m)
 
 #  for k in range(1,nx+1):
 #    for m in range(1,nz+1):
-#      sqk = (unitk[0]*k) * (unitk[0]*k) + (unitk[2]*m) * (unitk[2]*m)
+#      sqk = (kprefac[0]*k) * (kprefac[0]*k) + (kprefac[2]*m) * (kprefac[2]*m)
 #      if sqk <= gsqmx:
 #        kxvecs.append(k)
 #        kyvecs.append(0)
 #        kzvecs.append(m)
 #        ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-#        kcount += 1
+#        kpoints += 1
 
 #        kxvecs.append(k)
 #        kyvecs.append(0)
 #        kzvecs.append(-m)
 #        ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-#        kcount += 1
+#        kpoints += 1
 
 #  # 1 = (k,l,m), 2 = (k,-l,m), 3 = (k,l,-m), 4 = (k,-l,-m)
 
 #  for k in range(1,nx+1):
 #    for l in range(1,ny+1):
 #      for m in range(1,nz+1):
-#        sqk = (unitk[0]*k) * (unitk[0]*k) + (unitk[1]*l) * (unitk[1]*l) + (unitk[2]*m) * (unitk[2]*m);
+#        sqk = (kprefac[0]*k) * (kprefac[0]*k) + (kprefac[1]*l) * (kprefac[1]*l) + (kprefac[2]*m) * (kprefac[2]*m);
 #        if sqk <= gsqmx:
 #          kxvecs.append(k)
 #          kyvecs.append(l)
 #          kzvecs.append(m)
 #          ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-#          kcount += 1
+#          kpoints += 1
 
 #          kxvecs.append(k)
 #          kyvecs.append(-l)
 #          kzvecs.append(m)
 #          ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-#          kcount += 1
+#          kpoints += 1
 
 #          kxvecs.append(k)
 #          kyvecs.append(l)
 #          kzvecs.append(-m)
 #          ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-#          kcount += 1
+#          kpoints += 1
 
 #          kxvecs.append(k)
 #          kyvecs.append(-l)
 #          kzvecs.append(-m)
 #          ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
-#          kcount += 1
+#          kpoints += 1
 
 
 

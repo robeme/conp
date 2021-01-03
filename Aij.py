@@ -45,8 +45,8 @@ def main(argv):
     
   # user error handling  
   if slabflag and wireflag: sys.exit("ERROR: can't use slab and wire correction at same time!")
-  if slabflag and not explflag and volfac <= 1.0: sys.exit("ERROR: slab factor is too small (at lead > 3.0)!")
-  if wireflag and not explflag and volfac <= 1.0: sys.exit("ERROR: wire factor is too small (at lead > 3.0)!")
+  if slabflag and not explflag and volfac <= 1.0: sys.exit("ERROR: slab factor is too small (at least > 3.0)!")
+  if wireflag and not explflag and volfac <= 1.0: sys.exit("ERROR: wire factor is too small (at least > 3.0)!")
   if slabflag and explflag and volfac > 1.0: sys.exit("ERROR: can't use explicit slab correction (EW2D) with volfac > 1.0!")
   
   # k-space parameters
@@ -181,7 +181,7 @@ def main(argv):
 
   if slabflag:
     if explflag:
-      print("  - using EW2D(?) slab correction")
+      print("  - using EW2D slab correction (see Hu, JCTC, 2014)")
       Axyinv = 1./(Lx*Ly)
       for i in range(N):
         for j in range(i,N):
@@ -207,12 +207,20 @@ def main(argv):
   print("  calculating k-space contributions ... ")    
   if preflag:
     print("  - with precomputation")
+    if not explflag: print("  - with spherical summation geometry (EW3D)")
     # get reciprocal lattice for 2DPBC (see metalwalls doc)
+    # basically it is a summation over x and y BUT solving z
+    # numerically (int -> sum) rather than using the erfc() 
+    # 
+    # the EW2D approach used here is discussed in Hu (JCTC, 2014)
+    # it's worth to mention that this part is independent on the summation order
+    # cf. results from kvecs of LAMMPS or metalwalls -> no difference
     for k in range(1,kpoints+1):         
       print('\r(%d/%d)' % (k,kpoints), end='', flush=True)
       
-      # no matter if we use EW3DC, EW1D or EW2D, we need to loop over 2D pbc k-space
-      l, m, n = compute_kmode_index_2D(k)   
+      # for EW3DC we need the full set of kpoints
+      if explflag: l, m, n = compute_kmode_index_2D(k)
+      else: l, m, n = compute_kmode_index_3D(k) 
 
       # kx = l * twopi / Lx
       kx = l*kprefac[0]
@@ -252,11 +260,13 @@ def main(argv):
     print('')
   else:
     print("  - w/o precomputation")
+    if not explflag: print("  - with spherical summation geometry")
     for k in range(1,kpoints+1):
       print('\r(%d/%d)' % (k+1,kpoints), end='', flush=True)
       
-      # no matter if we use EW3DC, EW1D or EW2D, we need to loop over 2D pbc k-space    
-      l, m, n = compute_kmode_index_2D(k)
+      # for EW3DC we need the full set of kpoints
+      if explflag: l, m, n = compute_kmode_index_2D(k)
+      else: l, m, n = compute_kmode_index_3D(k)
       
       # kx = l * twopi / Lx
       kx = l*kprefac[0]
@@ -286,7 +296,7 @@ def main(argv):
     A[il]=A[iu]
   
   np.savetxt('A.mat',A)  
-  np.set_printoptions(precision=3,suppress=True)
+  np.set_printoptions(precision=2,suppress=True)
   print(A)
   
 def ewald_coeffs():
@@ -361,6 +371,8 @@ def compute_kmode_index_3D(ik):
      m = np.mod(ik_mn, (2*ny+1)) - ny
      l = np.floor_divide(ik_mn,2*ny+1) + 1 # integer division
   return np.array([l,m,n],dtype=int)
+
+
       
 def help():
   print('usage: python Aij.py')
@@ -377,13 +389,9 @@ def help():
   
   sys.exit()
 
-# snippet for explicit loop over k-space
-#    for l in range(0,nx+1):
-#      for m in range(-ny,ny+1) if l > 0 else range(1,ny+1):
-#        for n in range(1,nz+1) if not explflag and (l==0) and (m==0) else range(-nz,nz+1):
-#          print('\r(%d/%d)' % (step,kpoints), end='', flush=True)
-# end snippet 
-
+if __name__ == "__main__":
+    main(sys.argv)
+    
 # snippet for looping over compute_kpoints() in k-space
 #      print("  - with spherical (EW3D) summation order")
 #      for k in range(kpoints):
@@ -416,9 +424,18 @@ def help():
 #      print('') 
 # end snippet
 
-#def compute_kpoints():
+# snippet for explicit loop over k-space
+#    for l in range(0,nx+1):
+#      for m in range(-ny,ny+1) if l > 0 else range(1,ny+1):
+#        for n in range(1,nz+1) if not explflag and (l==0) and (m==0) else range(-nz,nz+1):
+#          print('\r(%d/%d)' % (step,kpoints), end='', flush=True)
+# end snippet 
+
+#def lammps_kpoints():
 #  "kpoints for k-space part"
 #  global kpoints, kxvecs, kyvecs, kzvecs
+#  
+#  kpoints = 0 # reset kpoints
 #  
 #  kxvecs = []
 #  kyvecs = []
@@ -533,13 +550,6 @@ def help():
 #          kzvecs.append(-m)
 #          #ug.append(preu*np.exp(-0.25*sqk*alphasqinv)/sqk)
 #          kpoints += 1
-
-if __name__ == "__main__":
-    main(sys.argv)
-
-
-
-
 
 
 

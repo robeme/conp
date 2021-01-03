@@ -4,9 +4,11 @@ import numpy as np
 import math, sys
 from scipy.special import gammaincc
 
+np.set_printoptions(precision=2,suppress=True)
+
 def main(argv):
 
-  global wirefac, volfac, explflag, symflag, slabflag, wireflag, preflag
+  global wirefac, volfac, explflag, symflag, slabflag, wireflag, preflag, elcflag
   global Rc, nx, ny, nz, nmax, alpha, eta
   global kpoints, ksqmax, kprefac, kxvecs, kyvecs, kzvecs
   global Lx,Ly,Lz,V,Vinv,Axyinv,N,r
@@ -16,6 +18,7 @@ def main(argv):
   explflag = True # use explicit expression for slab correction (k=0)
   slabflag = False
   wireflag = False
+  elcflag = False
   preflag = True # should ewald terms be pre-computed for speed?
 
   volfac = 1.0
@@ -42,6 +45,7 @@ def main(argv):
     if '--slab' in inp: slabflag = True
     if '--wire' in inp: wireflag = True
     if '--pre' in inp: preflag = False
+    if '--elc' in inp: elcflag = True
     
   # user error handling  
   if slabflag and wireflag: sys.exit("ERROR: can't use slab and wire correction at same time!")
@@ -79,7 +83,9 @@ def main(argv):
   nmax = max([nx,ny,nz])
   kprefac = 2*np.pi*np.array([1./Lx,1./Ly,1./Lz])
   ksqmax = np.dot(kprefac*np.array([nx,ny,nz]),kprefac*np.array([nx,ny,nz]))
+  hsqmax = np.dot(kprefac[:2]*np.array([nx,ny]),kprefac[:2]*np.array([nx,ny]))
   kpoints = (2*nz+1)*(2*nx*ny+nx+ny)
+  hpoints = (2*nx*ny+nx+ny)
   
   selfcorr = (np.sqrt(2)*eta-2.*alpha)/np.sqrt(np.pi)
 
@@ -92,6 +98,8 @@ def main(argv):
   sqrpialpha = np.sqrt(np.pi)/alpha
   preSk = 8.*np.pi*Vinv
   preWire = 2.*np.pi*Vinv
+  Axyinv = 1./(Lx*Ly)
+  MY_2PIAxyinv = 2.*np.pi/(Lx*Ly)
  
   
   # allocate matrices 
@@ -182,7 +190,6 @@ def main(argv):
   if slabflag:
     if explflag:
       print("  - using EW2D slab correction (see Hu, JCTC, 2014)")
-      Axyinv = 1./(Lx*Ly)
       for i in range(N):
         for j in range(i,N):
            zij = r[j,2] - r[i,2] 
@@ -207,14 +214,16 @@ def main(argv):
   print("  calculating k-space contributions ... ")    
   if preflag:
     print("  - with precomputation")
-    if not explflag: print("  - with spherical summation geometry (EW3D)")
+    
     # get reciprocal lattice for 2DPBC (see metalwalls doc)
     # basically it is a summation over x and y BUT solving z
     # numerically (int -> sum) rather than using the erfc() 
     # 
     # the EW2D approach used here is discussed in Hu (JCTC, 2014)
+    # 
     # it's worth to mention that this part is independent on the summation order
-    # cf. results from kvecs of LAMMPS or metalwalls -> no difference
+    # since results for k-points from LAMMPS or metalwalls give no difference
+    
     for k in range(1,kpoints+1):         
       print('\r(%d/%d)' % (k,kpoints), end='', flush=True)
       
@@ -288,7 +297,52 @@ def main(argv):
             A[i,j] += pot_ij
             if not symflag and (i != j): A[j,i] += pot_ij             
     print('')
+    
+  ######################################
+  ###         ELC correction         ###
+  ######################################  
+    
+  if elcflag:
+    print("  calculating ELC corrections ... ") 
+    for ih in range(1,hpoints+1):         
+      print('\r(%d/%d)' % (ih,hpoints), end='', flush=True)
       
+      l, m = compute_hmode_index(ih)
+
+      # kx = l * twopi / Lx
+      hx = l*kprefac[0]
+      # ky = m * twopi / Ly
+      hy = m*kprefac[1]
+      
+      hsq = hx*hx + hy*hy
+      h = np.sqrt(hsq)
+      
+      prefac = MY_2PIAxyinv*(1./(h*(1.-np.exp(h*Lz))))
+      
+      if hsq <= hsqmax:
+      
+        mabs = abs(m)
+        sign_m = np.sign(m)
+
+        for i in range(N):
+        
+          cos_kxky_i = cos_kx[i,l] * cos_ky[i,mabs] - sin_kx[i,l] * sin_ky[i,mabs] * sign_m
+          sin_kxky_i = sin_kx[i,l] * cos_ky[i,mabs] + cos_kx[i,l] * sin_ky[i,mabs] * sign_m
+          for j in range(i,N):
+            
+            zij = r[j,2] - r[i,2] 
+          
+            cos_kxky_j = cos_kx[j,l] * cos_ky[j,mabs] - sin_kx[j,l] * sin_ky[j,mabs] * sign_m
+            sin_kxky_j = sin_kx[j,l] * cos_ky[j,mabs] + cos_kx[j,l] * sin_ky[j,mabs] * sign_m
+            
+            eih_dot_r = cos_kxky_i*cos_kxky_j + sin_kxky_i*sin_kxky_j
+            pot_ij = prefac*np.cosh(h*zij)*eih_dot_r
+               
+            A[i,j] += pot_ij
+            if not symflag and (i != j): 
+              A[j,i] += pot_ij 
+               
+    print('')
   if symflag: 
     # copy upper triangle to lower
     iu = np.triu_indices(N,1)
@@ -296,7 +350,6 @@ def main(argv):
     A[il]=A[iu]
   
   np.savetxt('A.mat',A)  
-  np.set_printoptions(precision=2,suppress=True)
   print(A)
   
 def ewald_coeffs():
@@ -372,7 +425,29 @@ def compute_kmode_index_3D(ik):
      l = np.floor_divide(ik_mn,2*ny+1) + 1 # integer division
   return np.array([l,m,n],dtype=int)
 
-
+def compute_hmode_index(ih):
+  """
+  returns h vector for ELC correction 
+  
+  rather than using individual loops, we compute the h-modes by running over kpoints
+  
+  the h-mode index is a (l,m) duplet
+  
+  assumes kmode start is (nx, ny)
+  l ranges from 0 to nx
+  m ranges from -ny to +ny, except when l==0, it ranges from 1 to +ny
+  """
+  
+  if (ih <= ny):
+    n = 0
+    m = (ih - 1) + 1
+    l = 0
+  else:
+    n = 0
+    ih_mn = (ih - ny - 1)
+    m = np.mod(ih_mn, (2*ny+1)) - ny
+    l = np.floor_divide(ih_mn, 2*ny+1) + 1 
+  return np.array([l,m],dtype=int)
       
 def help():
   print('usage: python Aij.py')
@@ -384,6 +459,7 @@ def help():
   print('  --sym        symmetric electrodes [default: %r]' % symflag)
   print('  --slab       toggle slab correction (z is non-periodic) [default: %r]' % slabflag)
   print('  --wire       toggle wire correction (x,y are non-periodic) [default: %r]' % wireflag)
+  print('  --elc        toggle ELC correction [default: %r]' % elcflag)
   print('  --pre        toggle ewald precomputation [default: %r]' % preflag)
   print('  --help       print this message')
   

@@ -20,6 +20,7 @@ def main(argv):
   wireflag = False
   elcflag = False
   preflag = True # should ewald terms be pre-computed for speed?
+  trapzflag = True # use trapezodial integration for kz long-range part
 
   volfac = 1.0
   
@@ -46,10 +47,11 @@ def main(argv):
     if '--wire' in inp: wireflag = True
     if '--pre' in inp: preflag = False
     if '--elc' in inp: elcflag = True
+    if '--trapz' in inp: trapzflag = False
     
   # user error handling  
   if slabflag and wireflag: sys.exit("ERROR: can't use slab and wire correction at same time!")
-  if slabflag and not explflag and volfac <= 1.0: sys.exit("ERROR: slab factor is too small (at least > 3.0)!")
+  #if slabflag and not explflag and volfac <= 1.0: sys.exit("ERROR: slab factor is too small (at least > 3.0)!")
   if wireflag and not explflag and volfac <= 1.0: sys.exit("ERROR: wire factor is too small (at least > 3.0)!")
   if slabflag and explflag and volfac > 1.0: sys.exit("ERROR: can't use explicit slab correction (EW2D) with volfac > 1.0!")
   
@@ -59,7 +61,7 @@ def main(argv):
   eta = 0.955234657
   # define nx, ny and nz BEFORE scaling box dimensions
   nx = 8
-  ny = 9 
+  ny = 9
   nz = 32
   
   # INFO: we should also increase ny and/or nz if we use EW3DC  
@@ -96,11 +98,11 @@ def main(argv):
   alphasq = alpha**2
   alphasqinv = 1.0 / alphasq
   sqrpialpha = np.sqrt(np.pi)/alpha
+  sqrpialphainv = 1./(np.sqrt(np.pi)*alpha)
   preSk = 8.*np.pi*Vinv
   preWire = 2.*np.pi*Vinv
   Axyinv = 1./(Lx*Ly)
   MY_2PIAxyinv = 2.*np.pi/(Lx*Ly)
- 
   
   # allocate matrices 
   A = np.zeros([N,N]) 
@@ -195,7 +197,8 @@ def main(argv):
            zij = r[j,2] - r[i,2] 
            # multiplication of zij with erf(zij) is symmetric, thus no need for abs(...)
            zijsq = zij*zij
-           pot_ij = 2.0*Axyinv * (sqrpialpha*np.exp(-zijsq*alphasq) + np.pi*zij*math.erf(zij*alpha))
+           #pot_ij = 2.0*Axyinv * (sqrpialpha*np.exp(-zijsq*alphasq) + np.pi*zij*math.erf(zij*alpha))                # metalwalls
+           pot_ij = np.pi*Axyinv * ( zij * math.erf( zij*alpha ) + sqrpialphainv * np.exp(-zijsq  * alphasq) )       # Hu (2014)
            A[i,j] -= pot_ij
            if not symflag and (i != j): A[j,i] -= pot_ij 
     else:
@@ -212,70 +215,121 @@ def main(argv):
   ######################################
   
   print("  calculating k-space contributions ... ")    
+   
   if preflag:
     print("  - with precomputation")
     
-    # get reciprocal lattice for 2DPBC (see metalwalls doc)
-    # basically it is a summation over x and y BUT solving z
-    # numerically (int -> sum) rather than using the erfc() 
-    # 
-    # the EW2D approach used here is discussed in Hu (JCTC, 2014)
-    # 
-    # it's worth to mention that this part is independent on the summation order
-    # since results for k-points from LAMMPS or metalwalls give no difference
-    
-    for k in range(1,kpoints+1):         
-      print('\r(%d/%d)' % (k,kpoints), end='', flush=True)
+    if trapzflag:
+      print("  - with trapezodial integration")
+      # get reciprocal lattice for 2DPBC (see metalwalls doc)
+      # basically it is a summation over x and y BUT solving z
+      # numerically (int -> sum) rather than using the erfc() 
+      # 
+      # the EW2D approach used here is discussed in Hu (JCTC, 2014)
+      # 
+      # it's worth to mention that this part is independent on the summation order
+      # since results for k-points from LAMMPS or metalwalls give no difference
       
-      # for EW3DC we need the full set of kpoints
-      if explflag: l, m, n = compute_kmode_index_2D(k)
-      else: l, m, n = compute_kmode_index_3D(k) 
+      for k in range(1,kpoints+1):         
+        print('\r(%d/%d)' % (k,kpoints), end='', flush=True)
+        
+        # I did not understand why it is here enough to have the 2D k-points
+        # although we actually need a EW3D for EW3DC (???). However, we get closer
+        # to the results of the metalwalls EW2D results if we use the 2D k-points for EW3DC
+        # However, if the use the 3D k-points from metalwalls we get the same result for 
+        # as obtained using the lammps k-points from lammps_kpoints
+        if explflag: l, m, n = compute_kmode_index_2D(k)
+        else: l, m, n = compute_kmode_index_3D(k)
+        #l, m, n = compute_kmode_index_2D(k)
 
-      # kx = l * twopi / Lx
-      kx = l*kprefac[0]
-      # ky = m * twopi / Ly
-      ky = m*kprefac[1]
-      # kz = N * twopi / Lz
-      kz = n*kprefac[2]
-      
-      ksq = kx*kx + ky*ky + kz*kz
-      
-      if ksq <= ksqmax:
-      
-        mabs = abs(m)
-        sign_m = np.sign(m)
-        nabs = abs(n)
-        sign_n = np.sign(n)
+        # kx = l * twopi / Lx
+        kx = l*kprefac[0]
+        # ky = m * twopi / Ly
+        ky = m*kprefac[1]
+        # kz = N * twopi / Lz
+        kz = n*kprefac[2]
         
-        Sk_alpha = preSk * np.exp(-0.25 * alphasqinv * ksq) / ksq
+        ksq = kx*kx + ky*ky + kz*kz
         
-        for i in range(N):
+        if ksq <= ksqmax:
         
-          cos_kxky = cos_kx[i,l] * cos_ky[i,mabs] - sin_kx[i,l] * sin_ky[i,mabs] * sign_m
-          sin_kxky = sin_kx[i,l] * cos_ky[i,mabs] + cos_kx[i,l] * sin_ky[i,mabs] * sign_m
-          cos_kxkykz_i = cos_kxky * cos_kz[i,nabs] - sin_kxky * sin_kz[i,nabs] * sign_n
-          sin_kxkykz_i = sin_kxky * cos_kz[i,nabs] + cos_kxky * sin_kz[i,nabs] * sign_n
-          for j in range(i,N):
+          mabs = abs(m)
+          sign_m = np.sign(m)
+          nabs = abs(n)
+          sign_n = np.sign(n)
           
-            cos_kxky = cos_kx[j,l] * cos_ky[j,mabs] - sin_kx[j,l] * sin_ky[j,mabs] * sign_m
-            sin_kxky = sin_kx[j,l] * cos_ky[j,mabs] + cos_kx[j,l] * sin_ky[j,mabs] * sign_m
-            cos_kxkykz_j = cos_kxky * cos_kz[j,nabs] - sin_kxky * sin_kz[j,nabs] * sign_n
-            sin_kxkykz_j = sin_kxky * cos_kz[j,nabs] + cos_kxky * sin_kz[j,nabs] * sign_n
+          #Sk_alpha = preSk * np.exp(-0.25 * alphasqinv * ksq) / ksq      # metalwalls
+          Sk_alpha = preSk * .5 * np.exp(-0.25 * alphasqinv * ksq) / ksq  # Hu (2014)
+          
+          for i in range(N):
+          
+            cos_kxky = cos_kx[i,l] * cos_ky[i,mabs] - sin_kx[i,l] * sin_ky[i,mabs] * sign_m
+            sin_kxky = sin_kx[i,l] * cos_ky[i,mabs] + cos_kx[i,l] * sin_ky[i,mabs] * sign_m
+            cos_kxkykz_i = cos_kxky * cos_kz[i,nabs] - sin_kxky * sin_kz[i,nabs] * sign_n
+            sin_kxkykz_i = sin_kxky * cos_kz[i,nabs] + cos_kxky * sin_kz[i,nabs] * sign_n
+            for j in range(i,N):
             
-            pot_ij = Sk_alpha * (cos_kxkykz_i*cos_kxkykz_j + sin_kxkykz_i*sin_kxkykz_j)
+              cos_kxky = cos_kx[j,l] * cos_ky[j,mabs] - sin_kx[j,l] * sin_ky[j,mabs] * sign_m
+              sin_kxky = sin_kx[j,l] * cos_ky[j,mabs] + cos_kx[j,l] * sin_ky[j,mabs] * sign_m
+              cos_kxkykz_j = cos_kxky * cos_kz[j,nabs] - sin_kxky * sin_kz[j,nabs] * sign_n
+              sin_kxkykz_j = sin_kxky * cos_kz[j,nabs] + cos_kxky * sin_kz[j,nabs] * sign_n
+              
+              pot_ij = Sk_alpha * (cos_kxkykz_i*cos_kxkykz_j + sin_kxkykz_i*sin_kxkykz_j)
+              
+              A[i,j] += pot_ij
+              if not symflag and (i != j): A[j,i] += pot_ij                 
+      print('')
+    else:
+      print("  - with analytical expression from Hu (2014)")
+      for ih in range(1,hpoints+1):         
+        print('\r(%d/%d)' % (ih,hpoints), end='', flush=True)
+        
+        l, m = compute_hmode_index(ih)
+
+        # kx = l * twopi / Lx
+        hx = l*kprefac[0]
+        # ky = m * twopi / Ly
+        hy = m*kprefac[1]
+        
+        hsq = hx*hx + hy*hy
+        h = np.sqrt(hsq)
+        
+        prefac = MY_2PIAxyinv*(1./(h*(1.-np.exp(h*Lz))))
+        
+        if hsq <= hsqmax:
+        
+          mabs = abs(m)
+          sign_m = np.sign(m)
+          
+          Sk_pre = np.pi*.5*Axyinv / h
+
+          for i in range(N):
+          
+            cos_kxky_i = cos_kx[i,l] * cos_ky[i,mabs] - sin_kx[i,l] * sin_ky[i,mabs] * sign_m
+            sin_kxky_i = sin_kx[i,l] * cos_ky[i,mabs] + cos_kx[i,l] * sin_ky[i,mabs] * sign_m
+            for j in range(i,N):
+              
+              zij = r[j,2] - r[i,2] 
             
-            A[i,j] += pot_ij
-            if not symflag and (i != j): A[j,i] += pot_ij                 
-    print('')
+              cos_kxky_j = cos_kx[j,l] * cos_ky[j,mabs] - sin_kx[j,l] * sin_ky[j,mabs] * sign_m
+              sin_kxky_j = sin_kx[j,l] * cos_ky[j,mabs] + cos_kx[j,l] * sin_ky[j,mabs] * sign_m
+              
+              Sk_erf = np.exp(-h*zij) * math.erfc(h/alpha*.5-alpha*zij) \
+                     + np.exp( h*zij) * math.erfc(h/alpha*.5+alpha*zij)         
+              
+              pot_ij = Sk_erf * Sk_pre * (cos_kxky_i*cos_kxky_j + sin_kxky_i*sin_kxky_j)
+                 
+              A[i,j] += pot_ij
+              if not symflag and (i != j): 
+                A[j,i] += pot_ij 
+      print(' ')
   else:
     print("  - w/o precomputation")
     if not explflag: print("  - with spherical summation geometry")
     for k in range(1,kpoints+1):
       print('\r(%d/%d)' % (k+1,kpoints), end='', flush=True)
       
-      # for EW3DC we need the full set of kpoints
-      if explflag: l, m, n = compute_kmode_index_2D(k)
-      else: l, m, n = compute_kmode_index_3D(k)
+      l, m, n = compute_kmode_index_2D(k)
       
       # kx = l * twopi / Lx
       kx = l*kprefac[0]
@@ -427,9 +481,9 @@ def compute_kmode_index_3D(ik):
 
 def compute_hmode_index(ih):
   """
-  returns h vector for ELC correction 
-  
-  rather than using individual loops, we compute the h-modes by running over kpoints
+  returns h vector for ELC correction rather than using individual loops, we compute 
+  the h-modes by running over kpoints. compute_kmode_index_2D and 3D give the same 
+  values if nz is set to zero.
   
   the h-mode index is a (l,m) duplet
   
@@ -444,10 +498,12 @@ def compute_hmode_index(ih):
     l = 0
   else:
     n = 0
-    ih_mn = (ih - ny - 1)
+    ih_mn = ih - ny - 1
     m = np.mod(ih_mn, (2*ny+1)) - ny
     l = np.floor_divide(ih_mn, 2*ny+1) + 1 
   return np.array([l,m],dtype=int)
+
+  return np.array([l,m,n],dtype=int)
       
 def help():
   print('usage: python Aij.py')

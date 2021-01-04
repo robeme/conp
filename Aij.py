@@ -197,8 +197,7 @@ def main(argv):
            zij = r[j,2] - r[i,2] 
            # multiplication of zij with erf(zij) is symmetric, thus no need for abs(...)
            zijsq = zij*zij
-           #pot_ij = 2.0*Axyinv * (sqrpialpha*np.exp(-zijsq*alphasq) + np.pi*zij*math.erf(zij*alpha))                # metalwalls
-           pot_ij = np.pi*Axyinv * ( zij * math.erf( zij*alpha ) + sqrpialphainv * np.exp(-zijsq  * alphasq) )       # Hu (2014)
+           pot_ij = 2.0*Axyinv * (sqrpialpha*np.exp(-zijsq*alphasq) + np.pi*zij*math.erf(zij*alpha)) 
            A[i,j] -= pot_ij
            if not symflag and (i != j): A[j,i] -= pot_ij 
     else:
@@ -258,8 +257,7 @@ def main(argv):
           nabs = abs(n)
           sign_n = np.sign(n)
           
-          #Sk_alpha = preSk * np.exp(-0.25 * alphasqinv * ksq) / ksq      # metalwalls
-          Sk_alpha = preSk * .5 * np.exp(-0.25 * alphasqinv * ksq) / ksq  # Hu (2014)
+          Sk_alpha = preSk * np.exp(-0.25 * alphasqinv * ksq) / ksq
           
           for i in range(N):
           

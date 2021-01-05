@@ -103,6 +103,7 @@ def main(argv):
   preWire = 2.*np.pi*Vinv
   Axyinv = 1./(Lx*Ly)
   MY_2PIAxyinv = 2.*np.pi/(Lx*Ly)
+  MY_PIAxyinv = np.pi/(Lx*Ly)
   
   # allocate matrices 
   A = np.zeros([N,N]) 
@@ -279,47 +280,49 @@ def main(argv):
       print('')
     else:
       print("  - with analytical expression from Hu (2014)")
-      for ih in range(1,hpoints+1):         
-        print('\r(%d/%d)' % (ih,hpoints), end='', flush=True)
-        
-        l, m = compute_hmode_index(ih)
-
-        # kx = l * twopi / Lx
-        hx = l*kprefac[0]
-        # ky = m * twopi / Ly
-        hy = m*kprefac[1]
-        
-        hsq = hx*hx + hy*hy
-        h = np.sqrt(hsq)
-        
-        prefac = MY_2PIAxyinv*(1./(h*(1.-np.exp(h*Lz))))
-        
-        if hsq <= hsqmax:
-        
-          mabs = abs(m)
-          sign_m = np.sign(m)
+      ih = 1
+      hpoints = (2*nx+1)*(2*ny+1)
+      for l in range(-nx,nx+1):
+        for m in range(-ny,ny+1):
+          print('\r(%d/%d)' % (ih,hpoints), end='', flush=True)
           
-          Sk_pre = np.pi*.5*Axyinv / h
-
-          for i in range(N):
+          if l==0 and m==0: continue
           
-            cos_kxky_i = cos_kx[i,l] * cos_ky[i,mabs] - sin_kx[i,l] * sin_ky[i,mabs] * sign_m
-            sin_kxky_i = sin_kx[i,l] * cos_ky[i,mabs] + cos_kx[i,l] * sin_ky[i,mabs] * sign_m
-            for j in range(i,N):
-              
-              zij = r[j,2] - r[i,2] 
+          # kx = l * twopi / Lx
+          hx = l*kprefac[0]
+          # ky = m * twopi / Ly
+          hy = m*kprefac[1]
+          
+          hsq = hx*hx + hy*hy
+          h = np.sqrt(hsq)
+         
+          if hsq <= hsqmax:
+          
+            mabs = abs(m)
+            sign_m = np.sign(m)
             
-              cos_kxky_j = cos_kx[j,l] * cos_ky[j,mabs] - sin_kx[j,l] * sin_ky[j,mabs] * sign_m
-              sin_kxky_j = sin_kx[j,l] * cos_ky[j,mabs] + cos_kx[j,l] * sin_ky[j,mabs] * sign_m
+            Sk_pre = MY_PIAxyinv / h
+
+            for i in range(N):
+            
+              cos_kxky_i = cos_kx[i,l] * cos_ky[i,mabs] - sin_kx[i,l] * sin_ky[i,mabs] * sign_m
+              sin_kxky_i = sin_kx[i,l] * cos_ky[i,mabs] + cos_kx[i,l] * sin_ky[i,mabs] * sign_m
+              for j in range(i,N):
+                
+                zij = r[j,2] - r[i,2] 
               
-              Sk_erf = np.exp(-h*zij) * math.erfc(h/alpha*.5-alpha*zij) \
-                     + np.exp( h*zij) * math.erfc(h/alpha*.5+alpha*zij)         
-              
-              pot_ij = Sk_erf * Sk_pre * (cos_kxky_i*cos_kxky_j + sin_kxky_i*sin_kxky_j)
-                 
-              A[i,j] += pot_ij
-              if not symflag and (i != j): 
-                A[j,i] += pot_ij 
+                cos_kxky_j = cos_kx[j,l] * cos_ky[j,mabs] - sin_kx[j,l] * sin_ky[j,mabs] * sign_m
+                sin_kxky_j = sin_kx[j,l] * cos_ky[j,mabs] + cos_kx[j,l] * sin_ky[j,mabs] * sign_m
+                
+                Sk_erf = np.exp(-h*zij) * math.erfc(.5*h/alpha - alpha*zij) \
+                       + np.exp( h*zij) * math.erfc(.5*h/alpha + alpha*zij)         
+                
+                pot_ij = Sk_erf * Sk_pre * (cos_kxky_i*cos_kxky_j + sin_kxky_i*sin_kxky_j)
+                   
+                A[i,j] += pot_ij
+                if not symflag and (i != j): 
+                  A[j,i] += pot_ij 
+          ih += 1
       print(' ')
   else:
     print("  - w/o precomputation")
@@ -356,44 +359,47 @@ def main(argv):
     
   if elcflag:
     print("  calculating ELC corrections ... ") 
-    for ih in range(1,hpoints+1):         
-      print('\r(%d/%d)' % (ih,hpoints), end='', flush=True)
+    ih = 1
+    hpoints = (2*nx+1)*(2*ny+1)
+    for l in range(-nx,nx+1):
+      for m in range(-ny,ny+1):
+        print('\r(%d/%d)' % (ih,hpoints), end='', flush=True)
       
-      l, m = compute_hmode_index(ih)
-
-      # kx = l * twopi / Lx
-      hx = l*kprefac[0]
-      # ky = m * twopi / Ly
-      hy = m*kprefac[1]
+        if l==0 and m==0: continue
       
-      hsq = hx*hx + hy*hy
-      h = np.sqrt(hsq)
-      
-      prefac = MY_2PIAxyinv*(1./(h*(1.-np.exp(h*Lz))))
-      
-      if hsq <= hsqmax:
-      
-        mabs = abs(m)
-        sign_m = np.sign(m)
-
-        for i in range(N):
+        # kx = l * twopi / Lx
+        hx = l*kprefac[0]
+        # ky = m * twopi / Ly
+        hy = m*kprefac[1]
         
-          cos_kxky_i = cos_kx[i,l] * cos_ky[i,mabs] - sin_kx[i,l] * sin_ky[i,mabs] * sign_m
-          sin_kxky_i = sin_kx[i,l] * cos_ky[i,mabs] + cos_kx[i,l] * sin_ky[i,mabs] * sign_m
-          for j in range(i,N):
-            
-            zij = r[j,2] - r[i,2] 
+        hsq = hx*hx + hy*hy
+        h = np.sqrt(hsq)
+        
+        prefac = MY_2PIAxyinv*(1./(h*(1.-np.exp(h*Lz))))
+        
+        if hsq <= hsqmax:
+        
+          mabs = abs(m)
+          sign_m = np.sign(m)
+
+          for i in range(N):
           
-            cos_kxky_j = cos_kx[j,l] * cos_ky[j,mabs] - sin_kx[j,l] * sin_ky[j,mabs] * sign_m
-            sin_kxky_j = sin_kx[j,l] * cos_ky[j,mabs] + cos_kx[j,l] * sin_ky[j,mabs] * sign_m
+            cos_kxky_i = cos_kx[i,l] * cos_ky[i,mabs] - sin_kx[i,l] * sin_ky[i,mabs] * sign_m
+            sin_kxky_i = sin_kx[i,l] * cos_ky[i,mabs] + cos_kx[i,l] * sin_ky[i,mabs] * sign_m
+            for j in range(i,N):
+              
+              zij = r[j,2] - r[i,2] 
             
-            eih_dot_r = cos_kxky_i*cos_kxky_j + sin_kxky_i*sin_kxky_j
-            pot_ij = prefac*np.cosh(h*zij)*eih_dot_r
-               
-            A[i,j] += pot_ij
-            if not symflag and (i != j): 
-              A[j,i] += pot_ij 
-               
+              cos_kxky_j = cos_kx[j,l] * cos_ky[j,mabs] - sin_kx[j,l] * sin_ky[j,mabs] * sign_m
+              sin_kxky_j = sin_kx[j,l] * cos_ky[j,mabs] + cos_kx[j,l] * sin_ky[j,mabs] * sign_m
+              
+              eih_dot_r = cos_kxky_i*cos_kxky_j + sin_kxky_i*sin_kxky_j
+              pot_ij = prefac*np.cosh(h*zij)*eih_dot_r
+                 
+              A[i,j] += pot_ij
+              if not symflag and (i != j): 
+                A[j,i] += pot_ij 
+        ih += 1       
     print('')
   if symflag: 
     # copy upper triangle to lower

@@ -281,12 +281,10 @@ def main(argv):
     else:
       print("  - with analytical expression from Hu (2014)")
       ih = 1
-      hpoints = (2*nx+1)*(2*ny+1)
-      for l in range(-nx,nx+1):
-        for m in range(-ny,ny+1):
+      hpoints = (2*nx+1)*(2*ny+1)/2
+      for l in range(0,nx+1):
+        for m in range(-ny,ny+1) if l>0 else range(1,ny+1):
           print('\r(%d/%d)' % (ih,hpoints), end='', flush=True)
-          
-          if l==0 and m==0: continue
           
           # kx = l * twopi / Lx
           hx = l*kprefac[0]
@@ -360,9 +358,9 @@ def main(argv):
   if elcflag:
     print("  calculating ELC corrections ... ") 
     ih = 1
-    hpoints = (2*nx+1)*(2*ny+1)
-    for l in range(-nx,nx+1):
-      for m in range(-ny,ny+1):
+    hpoints = (2*nx+1)*(2*ny+1)/2
+    for l in range(0,nx+1):
+      for m in range(-ny,ny+1) if l>0 else range(1,ny+1):
         print('\r(%d/%d)' % (ih,hpoints), end='', flush=True)
       
         if l==0 and m==0: continue
